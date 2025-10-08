@@ -1,109 +1,122 @@
-import express from "express";
-import { exec, execSync } from "child_process";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import fetch from "node-fetch";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const app = express();
-app.use(express.json());
-
-const TMP = "/tmp";
-
-const run = (cmd) =>
-  new Promise((resolve, reject) => {
-    exec(cmd, (err, _so, se) => {
-      if (err) {
-        console.error(se || err);
-        reject(new Error("FFmpeg failed"));
-      } else resolve();
-    });
-  });
-
-const ffprobeDuration = (file) => {
-  const out = execSync(
-    `ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 "${file}"`
-  )
-    .toString()
-    .trim();
-  const n = parseFloat(out);
-  if (Number.isNaN(n)) throw new Error(`ffprobe failed for ${file}`);
-  return n;
-};
-
-async function download(url, i) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Download failed ${i}: ${r.status} ${r.statusText}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  const p = path.join(TMP, `clip_${i}.mp4`);
-  fs.writeFileSync(p, buf);
-  return p;
-}
-
-app.get("/healthz", (_req, res) => res.send("ok"));
-
-/**
- * POST /stitch
- * { "clips": ["url1","url2","url3"], "fade": 0.5 }
- * - macht Crossfade NUR im Video
- * - fügt am Ende eine stille Audiospur hinzu (AAC), damit das MP4 überall sauber abspielt
- */
-app.post("/stitch", async (req, res) => {
-  try {
-    const { clips, fade } = req.body;
-    if (!Array.isArray(clips) || clips.length === 0) {
-      return res.status(400).json({ error: "No clips provided" });
-    }
-    const FADE = Math.max(0.1, Math.min(Number(fade) || 0.5, 3)); // 0.1..3.0 s
-
-    // 1) download
-    const files = [];
-    for (let i = 0; i < clips.length; i++) files.push(await download(clips[i], i));
-
-    // 2) pairwise xfade (VIDEO ONLY)
-    let temp = files[0];
-    for (let i = 1; i < files.length; i++) {
-      const next = files[i];
-      const tempDur = ffprobeDuration(temp);
-      const offset = Math.max(FADE * 0.5, tempDur - FADE); // Start Crossfade
-
-      const stepOut = path.join(TMP, `step_${i}.mp4`);
-      const cmd = [
-        `ffmpeg -y -i "${temp}" -i "${next}"`,
-        `-filter_complex`,
-        `"[0:v][1:v]xfade=transition=fade:duration=${FADE}:offset=${offset.toFixed(3)}[v]"`,
-        `-map "[v]"`,
-        `-c:v libx264 -preset veryfast -crf 22 -vf format=yuv420p`,
-        `-an`, // keine Audiospur in Zwischensteps
-        `"${stepOut}"`
-      ].join(" ");
-      await run(cmd);
-      temp = stepOut;
-    }
-
-    // 3) finale stille Audiospur in gleicher Länge anhängen (AAC)
-    const finalOut = path.join(TMP, `final_output.mp4`);
-    const finalDur = ffprobeDuration(temp);
-    const addSilentCmd = [
-      // anullsrc (stereo/44.1k) und Video zusammenmuxen, Laufzeit = Video (shortest)
-      `ffmpeg -y -i "${temp}" -f lavfi -t ${finalDur.toFixed(3)} -i anullsrc=r=44100:cl=stereo`,
-      `-shortest -c:v copy -c:a aac -b:a 128k -movflags +faststart`,
-      `"${finalOut}"`
-    ].join(" ");
-    await run(addSilentCmd);
-
-    // 4) senden
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
-    res.sendFile(finalOut);
-  } catch (e) {
-    console.error("Server error:", e);
-    res.status(500).json({ error: "Server error", details: e.message });
-  }
-});
-
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+  libavformat    59. 27.100 / 59. 27.100
+  libavdevice    59.  7.100 / 59.  7.100
+  libavfilter     8. 44.100 /  8. 44.100
+  libswscale      6.  7.100 /  6.  7.100
+  libswresample   4.  7.100 /  4.  7.100
+  libpostproc    56.  6.100 / 56.  6.100
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '/tmp/clip_0.mp4':
+  Metadata:
+    major_brand     : isom
+    minor_version   : 512
+    compatible_brands: isomiso2avc1mp41
+    encoder         : Lavf58.29.100
+  Duration: 00:00:10.54, start: 0.000000, bitrate: 9008 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 768x1280, 8995 kb/s, 24 fps, 24 tbr, 12288 tbn (default)
+    Metadata:
+      handler_name    : VideoHandler
+      vendor_id       : [0][0][0][0]
+Input #1, mov,mp4,m4a,3gp,3g2,mj2, from '/tmp/clip_1.mp4':
+  Metadata:
+    major_brand     : isom
+    minor_version   : 512
+    compatible_brands: isomiso2avc1mp41
+    encoder         : Lavf58.29.100
+  Duration: 00:00:10.54, start: 0.000000, bitrate: 8757 kb/s
+  Stream #1:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 768x1280, 8744 kb/s, 24 fps, 24 tbr, 12288 tbn (default)
+    Metadata:
+      handler_name    : VideoHandler
+      vendor_id       : [0][0][0][0]
+Filtergraph 'format=yuv420p' was specified through the -vf/-af/-filter option for output stream 0:0, which is fed from a complex filtergraph.
+-vf/-af/-filter and -filter_complex cannot be used together for the same stream.
+Server error: Error: FFmpeg failed
+    at file:///app/server.js:21:16
+    at ChildProcess.exithandler (node:child_process:430:5)
+    at ChildProcess.emit (node:events:517:28)
+    at maybeClose (node:internal/child_process:1098:16)
+    at Socket.<anonymous> (node:internal/child_process:450:11)
+    at Socket.emit (node:events:517:28)
+    at Pipe.<anonymous> (node:net:350:12)
+ffmpeg version 5.1.7-0+deb12u1 Copyright (c) 2000-2025 the FFmpeg developers
+  built with gcc 12 (Debian 12.2.0-14+deb12u1)
+  configuration: --prefix=/usr --extra-version=0+deb12u1 --toolchain=hardened --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu --arch=amd64 --enable-gpl --disable-stripping --enable-gnutls --enable-ladspa --enable-libaom --enable-libass --enable-libbluray --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libjack --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libpulse --enable-librabbitmq --enable-librist --enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-libzvbi --enable-lv2 --enable-omx --enable-openal --enable-opencl --enable-opengl --enable-sdl2 --disable-sndio --enable-libjxl --enable-pocketsphinx --enable-librsvg --enable-libmfx --enable-libdc1394 --enable-libdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-libx264 --enable-libplacebo --enable-librav1e --enable-shared
+  libavutil      57. 28.100 / 57. 28.100
+    compatible_brands: isomiso2avc1mp41
+  libavcodec     59. 37.100 / 59. 37.100
+    at maybeClose (node:internal/child_process:1098:16)
+      handler_name    : VideoHandler
+    encoder         : Lavf58.29.100
+    at ChildProcess._handle.onexit (node:internal/child_process:303:5)
+  libavformat    59. 27.100 / 59. 27.100
+      vendor_id       : [0][0][0][0]
+  Duration: 00:00:10.54, start: 0.000000, bitrate: 9008 kb/s
+  libavdevice    59.  7.100 / 59.  7.100
+    compatible_brands: isomiso2avc1mp41
+Filtergraph 'format=yuv420p' was specified through the -vf/-af/-filter option for output stream 0:0, which is fed from a complex filtergraph.
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 768x1280, 8995 kb/s, 24 fps, 24 tbr, 12288 tbn (default)
+    at ChildProcess.exithandler (node:child_process:430:5)
+  libavfilter     8. 44.100 /  8. 44.100
+    encoder         : Lavf58.29.100
+    Metadata:
+  Duration: 00:00:10.54, start: 0.000000, bitrate: 8757 kb/s
+    at ChildProcess.emit (node:events:517:28)
+  libswscale      6.  7.100 /  6.  7.100
+  Stream #1:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 768x1280, 8744 kb/s, 24 fps, 24 tbr, 12288 tbn (default)
+      handler_name    : VideoHandler
+-vf/-af/-filter and -filter_complex cannot be used together for the same stream.
+    Metadata:
+  libswresample   4.  7.100 /  4.  7.100
+      vendor_id       : [0][0][0][0]
+  libpostproc    56.  6.100 / 56.  6.100
+Input #1, mov,mp4,m4a,3gp,3g2,mj2, from '/tmp/clip_1.mp4':
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '/tmp/clip_0.mp4':
+  Metadata:
+Server error: Error: FFmpeg failed
+  Metadata:
+    major_brand     : isom
+    major_brand     : isom
+    minor_version   : 512
+    at file:///app/server.js:21:16
+    minor_version   : 512
+    compatible_brands: isomiso2avc1mp41
+    encoder         : Lavf58.29.100
+  Duration: 00:00:10.54, start: 0.000000, bitrate: 9008 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 768x1280, 8995 kb/s, 24 fps, 24 tbr, 12288 tbn (default)
+    Metadata:
+      handler_name    : VideoHandler
+      vendor_id       : [0][0][0][0]
+Input #1, mov,mp4,m4a,3gp,3g2,mj2, from '/tmp/clip_1.mp4':
+  Metadata:
+    major_brand     : isom
+    minor_version   : 512
+    compatible_brands: isomiso2avc1mp41
+    encoder         : Lavf58.29.100
+  Duration: 00:00:10.54, start: 0.000000, bitrate: 8757 kb/s
+  Stream #1:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 768x1280, 8744 kb/s, 24 fps, 24 tbr, 12288 tbn (default)
+    Metadata:
+      handler_name    : VideoHandler
+      vendor_id       : [0][0][0][0]
+Filtergraph 'format=yuv420p' was specified through the -vf/-af/-filter option for output stream 0:0, which is fed from a complex filtergraph.
+-vf/-af/-filter and -filter_complex cannot be used together for the same stream.
+Server error: Error: FFmpeg failed
+    at file:///app/server.js:21:16
+    at ChildProcess.exithandler (node:child_process:430:5)
+    at ChildProcess.emit (node:events:517:28)
+    at maybeClose (node:internal/child_process:1098:16)
+    at Socket.<anonymous> (node:internal/child_process:450:11)
+    at Socket.emit (node:events:517:28)
+    at Pipe.<anonymous> (node:net:350:12)
+ffmpeg version 5.1.7-0+deb12u1 Copyright (c) 2000-2025 the FFmpeg developers
+  built with gcc 12 (Debian 12.2.0-14+deb12u1)
+  configuration: --prefix=/usr --extra-version=0+deb12u1 --toolchain=hardened --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu --arch=amd64 --enable-gpl --disable-stripping --enable-gnutls --enable-ladspa --enable-libaom --enable-libass --enable-libbluray --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libjack --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libpulse --enable-librabbitmq --enable-librist --enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-libzvbi --enable-lv2 --enable-omx --enable-openal --enable-opencl --enable-opengl --enable-sdl2 --disable-sndio --enable-libjxl --enable-pocketsphinx --enable-librsvg --enable-libmfx --enable-libdc1394 --enable-libdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-libx264 --enable-libplacebo --enable-librav1e --enable-shared
+  libavutil      57. 28.100 / 57. 28.100
+  libavcodec     59. 37.100 / 59. 37.100
+  libavformat    59. 27.100 / 59. 27.100
+  libavdevice    59.  7.100 / 59.  7.100
+  libavfilter     8. 44.100 /  8. 44.100
+  libswscale      6.  7.100 /  6.  7.100
+  libswresample   4.  7.100 /  4.  7.100
+  libpostproc    56.  6.100 / 56.  6.100
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '/tmp/clip_0.mp4':
+  Metadata:
+    major_brand     : isom
+    minor_version   : 512
