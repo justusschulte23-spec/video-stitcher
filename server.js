@@ -73,15 +73,13 @@ app.post("/stitch", async (req, res) => {
     const out = path.join(TMP, "stitched.mp4");
 
     // 4) FFmpeg: saubere MP4 für alle Player
-    const cmd = `
-      ffmpeg -y ${inputs} \
-        -filter_complex "${filter}" \
-        -map "[vout]" \
-        -c:v libx264 -profile:v high -level 4.0 -pix_fmt yuv420p \
-        -r 30 -vf "scale=1080:-2" \
-        -movflags +faststart \
-        "${out}"
-    `.replace(/\s+/g, " ");
+   const cmd = `
+ffmpeg -y ${inputs} \
+-filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p[v]" \
+-map "[v]" -c:v libx264 -profile:v high -level 4.0 -movflags +faststart \
+"${out}"
+`.replace(/\s+/g, " ");
+
 
     const { stderr } = await execa(cmd);
     if (!fs.existsSync(out)) {
