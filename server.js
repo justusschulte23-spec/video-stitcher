@@ -34,6 +34,7 @@ app.post("/stitch", async (req, res) => {
   try {
     const clips = req.body?.clips;
     const fade = Number(req.body?.fade ?? 0.5); // Sekunden
+    const { audioUrl, audioGain = 1.0 } = req.body || {};
     if (!Array.isArray(clips) || clips.length < 2) {
       return res.status(400).json({ error: "Provide clips: [url1,url2,url3]" });
     }
@@ -45,6 +46,11 @@ app.post("/stitch", async (req, res) => {
       await downloadToFile(clips[i], p);
       local.push(p);
     }
+let audioPath = null;
+if (audioUrl) {
+  audioPath = path.join(TMP, "voiceover.mp3");
+  await downloadToFile(audioUrl, audioPath);
+}
 
     // 2) Dauer pro Clip (für xfade-Offsets)
     const durations = [];
@@ -56,7 +62,9 @@ app.post("/stitch", async (req, res) => {
     // 3) Filter-Graph: Crossfades hintereinander
     // v0 -> v1 (offset d0 - fade), Ergebnis v01
     // v01 -> v2 (offset d0 + d1 - 2*fade), Ergebnis vout
-    const inputs = local.map((p, i) => `-i "${p}"`).join(" ");
+    // Inputs für ffmpeg (Videos + optional Audio)
+let inputs = local.map((p) => `-i "${p}"`).join(" ");
+if (audioPath) inputs += ` -i "${audioPath}"`;
     const filter =
       `[0:v]setpts=PTS-STARTPTS[v0];` +
       `[1:v]setpts=PTS-STARTPTS[v1];` +
@@ -72,13 +80,19 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 4) FFmpeg: saubere MP4 für alle Player
-   const cmd = `
+    // 4) FFmpeg – Video + Audio kombinieren
+const cmd = `
 ffmpeg -y ${inputs} \
 -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p[v]" \
--map "[v]" -c:v libx264 -profile:v high -level 4.0 -movflags +faststart \
+-map "[v]" \
+${audioPath
+  ? `-map ${local.length}:a:0? -c:a aac -b:a 192k ${audioGain !== 1 ? `-af volume=${audioGain}` : ""} -shortest`
+  : `-an`
+} \
+-c:v libx264 -profile:v high -level 4.0 -movflags +faststart \
 "${out}"
 `.replace(/\s+/g, " ");
+
 
 
     const { stderr } = await execa(cmd);
