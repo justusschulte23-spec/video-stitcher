@@ -1,95 +1,105 @@
+// server.js  — Drop-in Version: stitched MP4 mit Crossfade & faststart
+
 import express from "express";
-import { exec as execCb } from "child_process";
-import { writeFile, unlink } from "fs/promises";
+import { exec } from "child_process";
+import fs from "fs";
 import { promisify } from "util";
-const exec = promisify(execCb);
+import path from "path";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "5mb" }));
 
-// health check
-app.get("/healthz", (_, res) => res.send("ok"));
+const execa = promisify(exec);
+const TMP = "/tmp";
 
-// helper: download via curl (handles redirects/https robustly)
-async function download(url, outPath) {
-  // -L follow redirects, -sS silent but show errors, -o output
-  const cmd = `curl -L -sS "${url}" -o "${outPath}"`;
-  await exec(cmd);
+// kleine Helper
+async function downloadToFile(url, outPath) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed ${res.status}: ${url}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(outPath, buf);
 }
 
-// helper: get duration (seconds, float) with ffprobe
-async function getDuration(path) {
-  const { stdout } = await exec(
-    `ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "${path}"`
-  );
-  return parseFloat(stdout.trim());
+async function probeDurationSeconds(filePath) {
+  // ffprobe liefert Dauer in Sekunden (float) – falls leer, fallback 10.0
+  const cmd = `ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=nk=1:nw=1 "${filePath}"`;
+  const { stdout } = await execa(cmd);
+  const s = parseFloat((stdout || "").trim());
+  return Number.isFinite(s) && s > 0 ? s : 10.0;
 }
+
+app.get("/healthz", (_req, res) => res.send("ok"));
 
 app.post("/stitch", async (req, res) => {
   try {
-    const { clips = [], fade = 0.5 } = req.body || {};
+    const clips = req.body?.clips;
+    const fade = Number(req.body?.fade ?? 0.5); // Sekunden
     if (!Array.isArray(clips) || clips.length < 2) {
-      return res.status(400).json({ error: "Provide at least 2 clip URLs" });
+      return res.status(400).json({ error: "Provide clips: [url1,url2,url3]" });
     }
 
-    // 1) download all clips to /tmp
-    const local = await Promise.all(
-      clips.map(async (u, i) => {
-        const p = `/tmp/clip_${i}.mp4`;
-        await download(u, p);
-        return p;
-      })
-    );
-
-    // 2) get durations
-    const durs = await Promise.all(local.map(p => getDuration(p)));
-
-    // 3) build xfade filter dynamically (video only; your clips have no audio)
-    // inputs formatting
-    const prep = local.map((_, i) => `[${i}:v]setpts=PTS-STARTPTS,format=yuv420p[v${i}]`).join(";");
-    // chain v0 ⨉ v1 → x1, then x1 ⨉ v2 → x2, ...
-    let chain = `[v0][v1]xfade=transition=fade:duration=${fade}:offset=${Math.max(0, durs[0]-fade)}[x1]`;
-    for (let i = 2; i < local.length; i++) {
-      const prevLabel = i === 2 ? "x1" : `x${i-1}`;
-      chain += `;[${prevLabel}][v${i}]xfade=transition=fade:duration=${fade}:offset=${Math.max(0, (durs.slice(0,i).reduce((a,b)=>a+b,0) - fade))}[x${i}]`;
+    // 1) Downloads
+    const local = [];
+    for (let i = 0; i < clips.length; i++) {
+      const p = path.join(TMP, `clip_${i}.mp4`);
+      await downloadToFile(clips[i], p);
+      local.push(p);
     }
-    const lastLabel = `x${local.length-1}`;
 
-    const filter = `${prep};${chain}`;
+    // 2) Dauer pro Clip (für xfade-Offsets)
+    const durations = [];
+    for (const p of local) durations.push(await probeDurationSeconds(p));
+    // mind. zwei Werte vorhanden
+    const d0 = durations[0];
+    const d1 = durations[1];
 
-    // 4) run ffmpeg (NO separate -vf; format is already inside the filter graph)
-    const out = "/tmp/final_output.mp4";
-    const inputArgs = local.flatMap(p => ["-i", p]);
-    const cmd = [
-      "ffmpeg",
-      "-y",
-      ...inputArgs,
-      "-filter_complex", `"${filter}"`,
-      "-map", `[${lastLabel}]`,
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-crf", "20",
-      "-movflags", "+faststart",
-      out
-    ].join(" ");
+    // 3) Filter-Graph: Crossfades hintereinander
+    // v0 -> v1 (offset d0 - fade), Ergebnis v01
+    // v01 -> v2 (offset d0 + d1 - 2*fade), Ergebnis vout
+    const inputs = local.map((p, i) => `-i "${p}"`).join(" ");
+    const filter =
+      `[0:v]setpts=PTS-STARTPTS[v0];` +
+      `[1:v]setpts=PTS-STARTPTS[v1];` +
+      `[2:v]setpts=PTS-STARTPTS[v2];` +
+      `[v0][v1]xfade=transition=fade:duration=${fade}:offset=${Math.max(
+        0,
+        d0 - fade
+      ).toFixed(3)}[v01];` +
+      `[v01][v2]xfade=transition=fade:duration=${fade}:offset=${Math.max(
+        0,
+        d0 + d1 - 2 * fade
+      ).toFixed(3)}[vout]`;
 
-    await exec(cmd);
+    const out = path.join(TMP, "stitched.mp4");
 
-    // stream back the mp4
+    // 4) FFmpeg: saubere MP4 für alle Player
+    const cmd = `
+      ffmpeg -y ${inputs} \
+        -filter_complex "${filter}" \
+        -map "[vout]" \
+        -c:v libx264 -profile:v high -level 4.0 -pix_fmt yuv420p \
+        -r 30 -vf "scale=1080:-2" \
+        -movflags +faststart \
+        "${out}"
+    `.replace(/\s+/g, " ");
+
+    const { stderr } = await execa(cmd);
+    if (!fs.existsSync(out)) {
+      console.error(stderr);
+      return res.status(500).json({ error: "FFmpeg failed" });
+    }
+
+    // 5) Datei zurückgeben (n8n „Response format = File“ klappt auch)
+    const stat = fs.statSync(out);
     res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", stat.size);
     res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
-    res.sendFile(out, async () => {
-      // cleanup
-      await Promise.all(local.map(p => unlink(p).catch(()=>{})));
-      await unlink(out).catch(()=>{});
-    });
-
+    fs.createReadStream(out).pipe(res);
   } catch (err) {
     console.error("Server error:", err);
-    res.status(500).json({ error: "FFmpeg failed", detail: String(err) });
+    res.status(500).json({ error: String(err?.message || err) });
   }
 });
 
-// Railway will inject PORT
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on ${port}`));
+app.listen(port, () => console.log(`Server running on port ${port}`));
