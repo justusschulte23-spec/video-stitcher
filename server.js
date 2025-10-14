@@ -62,9 +62,11 @@ if (audioUrl) {
     // 3) Filter-Graph: Crossfades hintereinander
     // v0 -> v1 (offset d0 - fade), Ergebnis v01
     // v01 -> v2 (offset d0 + d1 - 2*fade), Ergebnis vout
-    // Inputs für ffmpeg (Videos + optional Audio)
-let inputs = local.map((p) => `-i "${p}"`).join(" ");
-if (audioPath) inputs += ` -i "${audioPath}"`;
+// Inputs für ffmpeg (Videos + optional Audio)
+let inputs = local.map(p => `-i "${p}"`).join(" ");
+if (audioPath) inputs += ` -i "${audioPath}"`; // macht Audio zum 4. Input (Index 3)
+
+
     const filter =
       `[0:v]setpts=PTS-STARTPTS[v0];` +
       `[1:v]setpts=PTS-STARTPTS[v1];` +
@@ -81,16 +83,23 @@ if (audioPath) inputs += ` -i "${audioPath}"`;
     const out = path.join(TMP, "stitched.mp4");
 
     // 4) FFmpeg – Video + Audio kombinieren
+// Ausgabedatei
+const out = path.join(TMP, "stitched.mp4");
+
+// Optional: Pfad zur SRT (du hast den ja schon erzeugt)
 const subtitleFile = path.join(TMP, "subtitles.srt");
 
+// FFmpeg: Videos + optional Audio + Untertitel kombinieren
 const cmd = `
-ffmpeg ${inputs} \
--filter_complex "${filter}[vout]scale=1080:2,fps=30,format=yuv420p[v];[v]subtitles=${subtitleFile}:force_style='Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,BorderStyle=3,Shadow=1'[vfinal]" \
--map "[vfinal]" \
--map "${audioPath}" -c:a aac -b:a 192k ${audioGain !== 1 ? `-af volume=${audioGain}` : ""} \
--c:v libx264 -profile:v high -level 4.0 -movflags +faststart \
-"${out}"
+ffmpeg -y ${inputs} \
+  -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p,subtitles='${subtitleFile}':force_style='Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,BorderStyle=3,Shadow=1'[vfinal]" \
+  -map "[vfinal]" \
+  ${audioPath ? `-map 3:a -c:a aac -b:a 192k -af "volume=${audioGain}"` : `-an`} \
+  -c:v libx264 -profile:v high -level 4.0 -movflags +faststart \
+  -shortest \
+  "${out}"
 `.replace(/\s+/g, " ");
+
 
 
 
