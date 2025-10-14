@@ -81,17 +81,17 @@ if (audioPath) inputs += ` -i "${audioPath}"`;
     const out = path.join(TMP, "stitched.mp4");
 
     // 4) FFmpeg – Video + Audio kombinieren
+const subtitleFile = path.join(TMP, "subtitles.srt");
+
 const cmd = `
-ffmpeg -y ${inputs} \
--filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p[v]" \
--map "[v]" \
-${audioPath
-  ? `-map ${local.length}:a:0? -c:a aac -b:a 192k ${audioGain !== 1 ? `-af volume=${audioGain}` : ""} -shortest`
-  : `-an`
-} \
+ffmpeg ${inputs} \
+-filter_complex "${filter}[vout]scale=1080:2,fps=30,format=yuv420p[v];[v]subtitles=${subtitleFile}:force_style='Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,BorderStyle=3,Shadow=1'[vfinal]" \
+-map "[vfinal]" \
+-map "${audioPath}" -c:a aac -b:a 192k ${audioGain !== 1 ? `-af volume=${audioGain}` : ""} \
 -c:v libx264 -profile:v high -level 4.0 -movflags +faststart \
 "${out}"
 `.replace(/\s+/g, " ");
+
 
 
 
