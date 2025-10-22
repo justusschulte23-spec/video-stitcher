@@ -82,22 +82,14 @@ if (audioPath) inputs += ` -i "${audioPath}"`; // macht Audio zum 4. Input (Inde
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 4) FFmpeg – Video + Audio kombinieren
-// Ausgabedatei
-const out = path.join(TMP, "stitched.mp4");
-
-// Optional: Pfad zur SRT (du hast den ja schon erzeugt)
-const subtitleFile = path.join(TMP, "subtitles.srt");
-
-// FFmpeg: Videos + optional Audio + Untertitel kombinieren
+    // 4) FFmpeg = Videos + optional Audio + Untertitel kombinieren
 const cmd = `
 ffmpeg -y ${inputs} \
-  -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p,subtitles='${subtitleFile}':force_style='Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,BorderStyle=3,Shadow=1'[vfinal]" \
-  -map "[vfinal]" \
-  ${audioPath ? `-map 3:a -c:a aac -b:a 192k -af "volume=${audioGain}"` : `-an`} \
-  -c:v libx264 -profile:v high -level 4.0 -movflags +faststart \
-  -shortest \
-  "${out}"
+-filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p,subtitles='${subtitleFile.replace(/:/g, "\\:")}:force_style=Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,BorderStyle=3,Shadow=1'[vfinal]" \
+-map "[vfinal]" \
+${audioPath ? `-map ${local.length}:a -c:a aac -b:a 192k -af "volume=${audioGain}"` : `-an`} \
+-c:v libx264 -profile:v high -level 4.0 -movflags +faststart -shortest \
+"${out}"
 `.replace(/\s+/g, " ");
 
 
