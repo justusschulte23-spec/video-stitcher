@@ -83,33 +83,28 @@ if (audioPath) inputs += ` -i "${audioPath}"`; // macht Audio zum 4. Input (Inde
       ).toFixed(3)}[vout]`;
 
     const out = path.join(TMP, "stitched.mp4");
-// Subtitle-Datei vorbereiten (falls Text mitgeliefert wurde)
+// 4) Subtitle-Datei vorbereiten (falls Text mitgeliefert wurde)
 const subtitleFile = path.join(TMP, "subtitles.srt");
 if (subtitlesText) fs.writeFileSync(subtitleFile, subtitlesText, "utf8");
 
-// FFmpeg-Teil für Untertitel (nur wenn vorhanden)
+// 5) FFmpeg-Teil für Untertitel (nur wenn vorhanden)
+// subFilter ist ein Filter-Schnipsel, der in die Video-Kette eingefügt wird
 const subFilter = subtitlesText
-  ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}:force_style=Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,BorderStyle=3,Shadow=1'`
+  ? `,subtitles='${subtitleFile.replace(/\\/g,"/")}':force_style=Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=1`
   : "";
 
-    // 4) FFmpeg = Videos + optional Audio + Untertitel kombinieren
+    
+// 6) FFmpeg = Videos + optional Audio + Untertitel kombinieren
 const cmd = `
 ffmpeg -y ${inputs} \
--filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]" \
-${audioPath ? `-map ${local.length}:a -c:a aac -b:a 192k -af "volume=${audioGain}"` : `-an`} \
--c:v libx264 -profile:v high -level 4.0 -movflags +faststart -shortest \
-"${out}"
+ -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]" \
+ -map "[v]" \
+ ${audioPath
+    ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k`
+    : `-an`} \
+ -c:v libx264 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
 `.replace(/\s+/g, " ");
 
-
-
-
-
-    const { stderr } = await execa(cmd);
-    if (!fs.existsSync(out)) {
-      console.error(stderr);
-      return res.status(500).json({ error: "FFmpeg failed" });
-    }
 
     // 5) Datei zurückgeben (n8n „Response format = File“ klappt auch)
     const stat = fs.statSync(out);
