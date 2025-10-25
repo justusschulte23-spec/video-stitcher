@@ -131,6 +131,11 @@ res.setHeader("Content-Type", "video/mp4");
 res.setHeader("Content-Length", stat.size);
 res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
 fs.createReadStream(out).pipe(res);
+    } catch (err) {
+  console.error("Server error:", err);
+  return res.status(500).json({ error: String(err?.message || err) });
+}
+
 }); // <-- schließt app.post("/stitch", ...)
 
 // --- Server starten + Timeouts hochsetzen ---
