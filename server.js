@@ -1,10 +1,11 @@
-// server.js  — Drop-in Version: stitched MP4 mit Crossfade & faststart
-
 import express from "express";
-import { exec } from "child_process";
+import { exec as execCb } from "child_process";
 import fs from "fs";
 import { promisify } from "util";
 import path from "path";
+
+const execp = promisify(execCb); // <-- NEU: promisified exec mit neuem Namen
+
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
@@ -107,7 +108,8 @@ ffmpeg -y -nostdin -loglevel error ${inputs} \
 
 let result;
 try {
-  result = await exec(cmd);
+ result = await execp(cmd, { maxBuffer: 8 * 1024 * 1024 });
+
 } catch (e) {
   console.error("FFmpeg error:", e.stderr || e.message || e);
   return res.status(500).json({
