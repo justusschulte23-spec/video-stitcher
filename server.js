@@ -96,7 +96,7 @@ const subFilter = subtitlesText
     
 // 6) FFmpeg = Videos + optional Audio + Untertitel kombinieren
 const cmd = `
-ffmpeg -y ${inputs} \
+ffmpeg -y -nostdin -loglevel error ${inputs} \
  -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]" \
  -map "[v]" \
  ${audioPath
@@ -105,18 +105,29 @@ ffmpeg -y ${inputs} \
  -c:v libx264 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
 `.replace(/\s+/g, " ");
 
+let result;
+try {
+  result = await exec(cmd);
+} catch (e) {
+  console.error("FFmpeg error:", e.stderr || e.message || e);
+  return res.status(500).json({
+    error: "FFmpeg failed",
+    details: e.stderr || String(e),
+  });
+}
 
-    // 5) Datei zurückgeben (n8n „Response format = File“ klappt auch)
-    const stat = fs.statSync(out);
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Length", stat.size);
-    res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
-    fs.createReadStream(out).pipe(res);
-  } catch (err) {
-    console.error("Server error:", err);
-    res.status(500).json({ error: String(err?.message || err) });
-  }
-});
+// Falls FFmpeg „grün“ zurückkam, aber keine Datei schrieb:
+if (!fs.existsSync(out)) {
+  console.error("Output missing. FFmpeg stderr:", result?.stderr);
+  return res.status(500).json({
+    error: "Output file not created",
+    details: result?.stderr || "No stderr returned",
+  });
+}
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+// 5) Datei zurückgeben
+const stat = fs.statSync(out);
+res.setHeader("Content-Type", "video/mp4");
+res.setHeader("Content-Length", stat.size);
+res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
+fs.createReadStream(out).pipe(res);
