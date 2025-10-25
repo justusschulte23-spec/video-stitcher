@@ -102,7 +102,7 @@ ffmpeg -y -nostdin -loglevel error ${inputs} \
  ${audioPath
     ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k`
     : `-an`} \
- -c:v libx264 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
+ -c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
 `.replace(/\s+/g, " ");
 
 let result;
@@ -125,9 +125,17 @@ if (!fs.existsSync(out)) {
   });
 }
 
-// 5) Datei zurückgeben
+// 7) Datei zurückgeben
 const stat = fs.statSync(out);
 res.setHeader("Content-Type", "video/mp4");
 res.setHeader("Content-Length", stat.size);
 res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
 fs.createReadStream(out).pipe(res);
+}); // <-- schließt app.post("/stitch", ...)
+
+// --- Server starten + Timeouts hochsetzen ---
+const port = process.env.PORT || 3000;
+const server = app.listen(port, () => console.log(`Server running on port ${port}`));
+server.requestTimeout = 600000;  // 10 Min
+server.headersTimeout = 610000;
+server.setTimeout?.(600000);
