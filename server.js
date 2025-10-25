@@ -86,10 +86,10 @@ app.post("/stitch", async (req, res) => {
     const subtitleFile = path.join(TMP, "subtitles.srt");
     if (subtitlesText) fs.writeFileSync(subtitleFile, subtitlesText, "utf8");
 
-    // 5) Untertitel-Filter-Schnipsel (robustes Quoting + Standard-Font)
-    const subFilter = subtitlesText
-      ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style=Fontname=DejaVu Sans,Fontsize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=1`
-      : "";
+   // 5) Untertitel-Filter-Schnipsel (robustes Quoting + Standard-Font)
+const subFilter = subtitlesText
+  ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=DejaVu Sans,FontSize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=1'`
+  : "";
 
     // 6) FFmpeg = Videos + optional Audio + Untertitel kombinieren
     const cmd = `
