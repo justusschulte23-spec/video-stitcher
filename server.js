@@ -67,6 +67,50 @@ app.post("/stitch", async (req, res) => {
     const d0 = durations[0];
     const d1 = durations[1];
 
+    // Baut eine SRT, in der jedes Wort nacheinander erscheint (gleichmäßig über die Audio-Dauer verteilt).
+async function buildWordSRTFromText(text, audioPath) {
+  const probeCmd = `ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${audioPath}"`;
+  const { stdout } = await execp(probeCmd, { maxBuffer: 8 * 1024 * 1024 });
+  const total = Math.max(0.1, parseFloat((stdout || "0").trim()) || 0);
+
+  const words = (text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+
+  if (!words.length) return "1\n00:00:00,000 --> 00:00:00,500\n \n";
+
+  let per = total / words.length;
+  per = Math.max(0.25, Math.min(1.2, per)); // 0.25–1.2s pro Wort
+
+  let t = 0;
+  let idx = 1;
+  const pad = (n) => String(n).padStart(2, "0");
+  const toTC = (sec) => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    const ms = Math.round((sec - Math.floor(sec)) * 1000);
+    return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms).padStart(3, "0")}`;
+  };
+
+  let srt = "";
+  for (const w of words) {
+    const start = toTC(t);
+    const end = toTC(Math.min(total, t + per));
+    srt += `${idx}\n${start} --> ${end}\n${w}\n\n`;
+    idx += 1;
+    t += per;
+    if (t >= total) break;
+  }
+  if (!srt.endsWith("\n\n")) srt += "\n";
+  return srt;
+}
+
+
+    
+
     // 3) Filter-Graph: Crossfades hintereinander (3 Clips)
     // v0 -> v1 (offset d0 - fade) = [v01]
     // v01 -> v2 (offset d0 + d1 - 2*fade) = [vout]
@@ -82,14 +126,25 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 4) Subtitle-Datei vorbereiten (falls Text mitgeliefert wurde)
-    const subtitleFile = path.join(TMP, "subtitles.srt");
-    if (subtitlesText) fs.writeFileSync(subtitleFile, subtitlesText, "utf8");
+    // 4) Subtitle-Datei vorbereiten
+const subtitleFile = path.join(TMP, "subtitles.srt");
 
-   // 5) Untertitel-Filter-Schnipsel (robustes Quoting + Standard-Font)
+// Falls "words"-Modus aktiv: aus Fließtext Wort-für-Wort-SRT bauen
+if (req.body?.subtitle_mode === "words" && subtitlesText && audioPath) {
+  const wordSrt = await buildWordSRTFromText(subtitlesText, audioPath);
+  fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+} else if (subtitlesText) {
+  // ansonsten: gelieferten Text/SRT schreiben
+  fs.writeFileSync(subtitleFile, subtitlesText, "utf8");
+}
+
+
+ // 5) Untertitel-Filter-Schnipsel (Outline, unten mittig, kein Kasten)
+// Hinweis: Font "Anton" muss im Container installiert sein; sonst nimmt libass einen Fallback.
 const subFilter = subtitlesText
-  ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=DejaVu Sans,FontSize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=1'`
+  ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=Anton,FontSize=48,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=220'`
   : "";
+
 
     // 6) FFmpeg = Videos + optional Audio + Untertitel kombinieren
     const cmd = `
