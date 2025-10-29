@@ -7,6 +7,23 @@ import { promisify } from "util";
 import path from "path";
 
 const execp = promisify(execCb);          // promisified exec
+
+// ---- Anton Font Registration ----
+const FONTS_DIR = path.join(process.cwd(), "video-stitcher"); // Pfad anpassen, da Font im Root-Ordner liegt
+
+try {
+  if (fs.existsSync(FONTS_DIR)) {
+    console.log("Registering local Anton font...");
+    // Font ins System kopieren und Cache aktualisieren
+    await execp(
+      `mkdir -p /usr/share/fonts/truetype/custom && cp ${FONTS_DIR}/*.ttf /usr/share/fonts/truetype/custom && fc-cache -fv`
+    );
+    console.log("Anton font registered successfully.");
+  }
+} catch (e) {
+  console.warn("Font registration skipped:", e.message);
+}
+
 const app = express();
 app.use(express.json({ limit: "5mb" }));
 
