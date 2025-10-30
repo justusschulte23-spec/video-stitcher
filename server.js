@@ -143,35 +143,34 @@ async function buildWordSRTFromText(text, audioPath) {
 
     const out = path.join(TMP, "stitched.mp4");
 
-   // 4) Subtitle-Datei vorbereiten
+  // 4) Subtitle-Datei vorbereiten
 const subtitleFile = path.join(TMP, "subtitles.srt");
+let hasSubtitles = false;
 
-// 4a) Eingehenden Text erstmal von SRT-Kram befreien
+// evtl. SRT-Timestamps aus dem Input entfernen
 const rawSubtitleText = subtitlesText || "";
 const cleanedSubtitleText = rawSubtitleText
-  // Zeilen wie "00:00:00,000 --> 00:00:05,652" raus
   .replace(/^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}$/gm, "")
-  // reine Nummernzeilen (1, 2, 3, ...)
   .replace(/^\d+\s*$/gm, "")
-  // leere Zeilen auf eine reduzieren
   .replace(/\n{2,}/g, "\n")
   .trim();
 
 if (req.body?.subtitle_mode === "words" && cleanedSubtitleText && audioPath) {
-  // Wort-für-Wort-SRT aus dem gesäuberten Text bauen
   const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
   fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+  hasSubtitles = true;
 } else if (cleanedSubtitleText) {
-  // ansonsten: (bereinigten) Text/SRT schreiben
   fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
+  hasSubtitles = true;
 }
 
 
- // 5) Untertitel-Filter-Schnipsel (Outline, unten mittig, kein Kasten)
-// Hinweis: Font "Anton" muss im Container installiert sein; sonst nimmt libass einen Fallback.
-const subFilter = subtitlesText
-  ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=Anton,FontSize=48,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=220'`
+
+const subFilter = hasSubtitles
+  ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
   : "";
+
+
 
 
     // 6) FFmpeg = Videos + optional Audio + Untertitel kombinieren
