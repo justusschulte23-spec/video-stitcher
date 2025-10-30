@@ -174,9 +174,10 @@ app.post("/stitch", async (req, res) => {
     const haveSubtitleFile = hasSubtitles && fs.existsSync(subtitleFile);
 
     // 6) Untertitel-Filter-Schnipsel nur, wenn Datei da ist
-    const subFilter = haveSubtitleFile
-      ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
-      : "";
+   const subFilter = haveSubtitleFile
+  ? `,subtitles=${subtitleFile.replace(/\\/g, "/")}:force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
+  : "";
+
 
     // 7) FFmpeg = Videos + optional Audio + evtl. Untertitel kombinieren
     const cmd = `
