@@ -1,4 +1,4 @@
-// server.js — Drop-in Version: stitched MP4 mit Crossfade, Untertitel & faststart
+// server.js — stitched MP4 mit Crossfade, Untertitel & faststart
 
 import express from "express";
 import { exec as execCb } from "child_process";
@@ -6,33 +6,33 @@ import fs from "fs";
 import { promisify } from "util";
 import path from "path";
 
-const execp = promisify(execCb); // promisified exec
+const execp = promisify(execCb);
 
-// ---- Anton Font Registration ----
-// du hast Anton unter /app/fonts/Anton-Regular.ttf eingecheckt,
-// also hier auf "fonts" zeigen – nicht auf "video-stitcher"
-const FONTS_DIR = path.join(process.cwd(), "fonts");
+const app = express();
+app.use(express.json({ limit: "5mb" }));
 
+// Verzeichnisse
+const WORKDIR = process.cwd();              // z.B. /app
+const TMP = "/tmp";                         // für Videos ok
+
+// 1) Fonts registrieren (du hast sie in /app/fonts/…)
+const FONTS_DIR = path.join(WORKDIR, "fonts");
 try {
   if (fs.existsSync(FONTS_DIR)) {
-    console.log("Registering local Anton font...");
+    console.log("Registering local Anton font ...");
     await execp(
       `mkdir -p /usr/share/fonts/truetype/custom && cp ${FONTS_DIR}/*.ttf /usr/share/fonts/truetype/custom && fc-cache -fv`
     );
-    console.log("Anton font registered successfully.");
+    console.log("Anton font registered.");
   } else {
-    console.log("No local fonts/ directory found, skipping font registration.");
+    console.log("No fonts/ dir found, skipping font registration.");
   }
 } catch (e) {
   console.warn("Font registration skipped:", e.message);
 }
 
-const app = express();
-app.use(express.json({ limit: "5mb" }));
-
-const TMP = "/tmp";
-
-// --- kleine Helper -----------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Helper
 async function downloadToFile(url, outPath) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Download failed ${res.status}: ${url}`);
@@ -41,31 +41,29 @@ async function downloadToFile(url, outPath) {
 }
 
 async function probeDurationSeconds(filePath) {
-  // ffprobe liefert Dauer der Video-Streamspur (Sekunden, float)
   const cmd = `ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=nk=1:nw=1 "${filePath}"`;
   const { stdout } = await execp(cmd, { maxBuffer: 8 * 1024 * 1024 });
   const s = parseFloat((stdout || "").trim());
   return Number.isFinite(s) && s > 0 ? s : 10.0;
 }
 
-app.get("/healthz", (_req, res) => res.send("ok"));
-
-// --- Haupt-Route --------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Route
 app.post("/stitch", async (req, res) => {
-  // Verbindung lange offen halten (gegen 502)
-  res.setTimeout(600000); // 10 Minuten
+  res.setTimeout(600000);
 
   try {
     const clips = req.body?.clips;
-    const fade = Number(req.body?.fade ?? 0.5); // Sekunden
+    const fade = Number(req.body?.fade ?? 0.5);
     const { audioUrl, audioGain = 1.0 } = req.body || {};
     const subtitlesText = req.body?.subtitles_text || null;
+    const subtitleMode = req.body?.subtitle_mode || "normal";
 
     if (!Array.isArray(clips) || clips.length < 2) {
-      return res.status(400).json({ error: "Provide clips: [url1,url2,url3]" });
+      return res.status(400).json({ error: "Provide clips: [url1,url2,...]" });
     }
 
-    // 1) Downloads
+    // 1) Videos laden
     const local = [];
     for (let i = 0; i < clips.length; i++) {
       const p = path.join(TMP, `clip_${i}.mp4`);
@@ -73,14 +71,14 @@ app.post("/stitch", async (req, res) => {
       local.push(p);
     }
 
-    // Audio evtl. auch laden
+    // 2) Audio laden
     let audioPath = null;
     if (audioUrl) {
       audioPath = path.join(TMP, "voiceover.mp3");
       await downloadToFile(audioUrl, audioPath);
     }
 
-    // 2) Dauer pro Clip (für xfade-Offsets) – wir nutzen die ersten drei Clips
+    // 3) Längen bestimmen (nur 3 Clips)
     const durations = [];
     for (const p of local.slice(0, 3)) {
       durations.push(await probeDurationSeconds(p));
@@ -88,10 +86,9 @@ app.post("/stitch", async (req, res) => {
     const d0 = durations[0];
     const d1 = durations[1];
 
-    // 2a) Hilfsfunktion INSIDE Route (ok so):
-    // Baut eine SRT, in der jedes Wort nacheinander erscheint (gleichmäßig über die Audio-Dauer verteilt).
-    async function buildWordSRTFromText(text, audioPathLocal) {
-      const probeCmd = `ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${audioPathLocal}"`;
+    // 4) Wort-SRT-Builder (innerhalb der Route)
+    async function buildWordSRTFromText(text, audioFile) {
+      const probeCmd = `ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${audioFile}"`;
       const { stdout } = await execp(probeCmd, { maxBuffer: 8 * 1024 * 1024 });
       const total = Math.max(0.1, parseFloat((stdout || "0").trim()) || 0);
 
@@ -101,10 +98,10 @@ app.post("/stitch", async (req, res) => {
         .split(" ")
         .filter(Boolean);
 
-      if (!words.length) return "1\n00:00:00,000 --> 00:00:00,500\n \n";
+      if (!words.length) return "1\n00:00:00,000 --> 00:00:00,600\n \n";
 
       let per = total / words.length;
-      per = Math.max(0.25, Math.min(1.2, per)); // 0.25–1.2s pro Wort
+      per = Math.max(0.25, Math.min(1.2, per));
 
       let t = 0;
       let idx = 1;
@@ -122,65 +119,73 @@ app.post("/stitch", async (req, res) => {
         const start = toTC(t);
         const end = toTC(Math.min(total, t + per));
         srt += `${idx}\n${start} --> ${end}\n${w}\n\n`;
-        idx += 1;
+        idx++;
         t += per;
         if (t >= total) break;
       }
-      if (!srt.endsWith("\n\n")) srt += "\n";
       return srt;
     }
 
-    // 3) Filter-Graph: Crossfades hintereinander (3 Clips)
+    // 5) Filtergraph (Crossfade)
     let inputs = local.slice(0, 3).map((p) => `-i "${p}"`).join(" ");
-    if (audioPath) inputs += ` -i "${audioPath}"`; // Audio ist dann 4. Input (Index 3)
+    if (audioPath) inputs += ` -i "${audioPath}"`;
 
     const filter =
       `[0:v]setpts=PTS-STARTPTS[v0];` +
       `[1:v]setpts=PTS-STARTPTS[v1];` +
       `[2:v]setpts=PTS-STARTPTS[v2];` +
-      `[v0][v1]xfade=transition=fade:duration=${fade}:offset=${Math.max(0, d0 - fade).toFixed(3)}[v01];` +
-      `[v01][v2]xfade=transition=fade:duration=${fade}:offset=${Math.max(0, d0 + d1 - 2 * fade).toFixed(3)}[vout]`;
+      `[v0][v1]xfade=transition=fade:duration=${fade}:offset=${Math.max(
+        0,
+        d0 - fade
+      ).toFixed(3)}[v01];` +
+      `[v01][v2]xfade=transition=fade:duration=${fade}:offset=${Math.max(
+        0,
+        d0 + d1 - 2 * fade
+      ).toFixed(3)}[vout]`;
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 4) Subtitle-Datei vorbereiten
-    const subtitleFile = path.join(TMP, "subtitles.srt");
-    let hasSubtitles = false;
+    // 6) Untertitel-Datei JETZT nicht nach /tmp, sondern ins Arbeitsverzeichnis
+    const subtitleFile = path.join(WORKDIR, "subtitles.srt");
+    let haveSubtitleFile = false;
 
-    // Eingehenden Text von SRT-Kram befreien (n8n liefert SRT)
-    const rawSubtitleText = subtitlesText || "";
-    const cleanedSubtitleText = rawSubtitleText
-      // "00:00:00,000 --> 00:00:05,652 ..." entfernen
+    // n8n-SRT säubern
+    const cleanedSubtitleText = (subtitlesText || "")
+      // timecodes
       .replace(
         /^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}.*$/gm,
         ""
       )
-      // reine Nummernzeilen entfernen
+      // nummern
       .replace(/^\d+\s*$/gm, "")
-      // leere Zeilen reduzieren
+      // mehrfach-leerzeilen
       .replace(/\n{2,}/g, "\n")
       .trim();
 
-    if (req.body?.subtitle_mode === "words" && cleanedSubtitleText && audioPath) {
-      const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
-      fs.writeFileSync(subtitleFile, wordSrt, "utf8");
-      hasSubtitles = true;
+    if (subtitleMode === "words" && cleanedSubtitleText && audioPath) {
+      const srt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
+      fs.writeFileSync(subtitleFile, srt, "utf8");
+      haveSubtitleFile = true;
     } else if (cleanedSubtitleText) {
       fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
-      hasSubtitles = true;
+      haveSubtitleFile = true;
     }
 
-    // 5) Prüfen, ob die Datei WIRKLICH existiert
-    const haveSubtitleFile = hasSubtitles && fs.existsSync(subtitleFile);
+    // sicherheitshalber noch mal checken
+    if (haveSubtitleFile && !fs.existsSync(subtitleFile)) {
+      // dann doch nicht
+      haveSubtitleFile = false;
+    }
 
-    // 6) Untertitel-Filter-Schnipsel nur, wenn Datei da ist
-   const subFilter = haveSubtitleFile
-  ? `,subtitles=${subtitleFile.replace(/\\/g, "/")}:force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
-  : "";
+    // 7) Subtitle-Filter bauen (ohne Quotes um den Pfad!)
+    const subFilter = haveSubtitleFile
+      ? `,subtitles=${subtitleFile.replace(
+          /\\/g,
+          "/"
+        )}:force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
+      : "";
 
-
-
-    // 7) FFmpeg = Videos + optional Audio + evtl. Untertitel kombinieren
+    // 8) FFmpeg-Kommando
     const cmd = `
 ffmpeg -y -nostdin -loglevel error ${inputs} \
  -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]" \
@@ -189,10 +194,9 @@ ffmpeg -y -nostdin -loglevel error ${inputs} \
  -c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
 `.replace(/\s+/g, " ");
 
-    // >>> HIER: FFmpeg wirklich ausführen <<<
-    let ffResult;
+    let ff;
     try {
-      ffResult = await execp(cmd, { maxBuffer: 16 * 1024 * 1024 });
+      ff = await execp(cmd, { maxBuffer: 16 * 1024 * 1024 });
     } catch (e) {
       console.error("FFmpeg error:", e.stderr || e.message || e);
       return res
@@ -200,16 +204,13 @@ ffmpeg -y -nostdin -loglevel error ${inputs} \
         .json({ error: "FFmpeg failed", details: e.stderr || String(e) });
     }
 
-    // Sicherstellen, dass Datei existiert
     if (!fs.existsSync(out)) {
-      console.error("Output missing. FFmpeg stderr:", ffResult?.stderr);
-      return res.status(500).json({
-        error: "Output file not created",
-        details: ffResult?.stderr || "No stderr returned",
-      });
+      console.error("Output missing:", ff?.stderr);
+      return res
+        .status(500)
+        .json({ error: "Output file not created", details: ff?.stderr || "" });
     }
 
-    // 8) Datei zurückgeben
     const stat = fs.statSync(out);
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Length", stat.size);
@@ -219,13 +220,13 @@ ffmpeg -y -nostdin -loglevel error ${inputs} \
     console.error("Server error:", err);
     return res.status(500).json({ error: String(err?.message || err) });
   }
-}); // schließt app.post("/stitch")
+});
 
-// --- Server starten + Timeouts hochsetzen ------------------------------------
+// -----------------------------------------------------------------------------
 const port = process.env.PORT || 3000;
 const server = app.listen(port, () =>
   console.log(`Server running on port ${port}`)
 );
-server.requestTimeout = 600000; // 10 Min
+server.requestTimeout = 600000;
 server.headersTimeout = 610000;
 server.setTimeout?.(600000);
