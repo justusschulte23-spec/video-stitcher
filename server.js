@@ -179,6 +179,7 @@ app.post("/stitch", async (req, res) => {
   : "";
 
 
+
     // 7) FFmpeg = Videos + optional Audio + evtl. Untertitel kombinieren
     const cmd = `
 ffmpeg -y -nostdin -loglevel error ${inputs} \
