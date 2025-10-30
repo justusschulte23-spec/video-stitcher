@@ -143,16 +143,27 @@ async function buildWordSRTFromText(text, audioPath) {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 4) Subtitle-Datei vorbereiten
+   // 4) Subtitle-Datei vorbereiten
 const subtitleFile = path.join(TMP, "subtitles.srt");
 
-// Falls "words"-Modus aktiv: aus Fließtext Wort-für-Wort-SRT bauen
-if (req.body?.subtitle_mode === "words" && subtitlesText && audioPath) {
-  const wordSrt = await buildWordSRTFromText(subtitlesText, audioPath);
+// 4a) Eingehenden Text erstmal von SRT-Kram befreien
+const rawSubtitleText = subtitlesText || "";
+const cleanedSubtitleText = rawSubtitleText
+  // Zeilen wie "00:00:00,000 --> 00:00:05,652" raus
+  .replace(/^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}$/gm, "")
+  // reine Nummernzeilen (1, 2, 3, ...)
+  .replace(/^\d+\s*$/gm, "")
+  // leere Zeilen auf eine reduzieren
+  .replace(/\n{2,}/g, "\n")
+  .trim();
+
+if (req.body?.subtitle_mode === "words" && cleanedSubtitleText && audioPath) {
+  // Wort-für-Wort-SRT aus dem gesäuberten Text bauen
+  const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
   fs.writeFileSync(subtitleFile, wordSrt, "utf8");
-} else if (subtitlesText) {
-  // ansonsten: gelieferten Text/SRT schreiben
-  fs.writeFileSync(subtitleFile, subtitlesText, "utf8");
+} else if (cleanedSubtitleText) {
+  // ansonsten: (bereinigten) Text/SRT schreiben
+  fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
 }
 
 
