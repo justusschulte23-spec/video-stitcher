@@ -143,77 +143,50 @@ async function buildWordSRTFromText(text, audioPath) {
 
     const out = path.join(TMP, "stitched.mp4");
 
- // 4) Subtitle-Datei vorbereiten
+// 4) Subtitle-Datei vorbereiten
 const subtitleFile = path.join(TMP, "subtitles.srt");
 let hasSubtitles = false;
 
-// 4a) Eingehenden Text von SRT-Kram befreien (n8n liefert echte SRTs)
+// Eingehenden Text von SRT-Kram befreien (n8n liefert SRT)
 const rawSubtitleText = subtitlesText || "";
 const cleanedSubtitleText = rawSubtitleText
-  // Zeilen wie "00:00:00,000 --> 00:00:05,652"
+  // Zeilen wie "00:00:00,000 --> 00:00:05,652 ..."
   .replace(
     /^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}.*$/gm,
     ""
   )
-  // reine Nummernzeilen (1, 2, 3, ...)
+  // reine Nummernzeilen entfernen
   .replace(/^\d+\s*$/gm, "")
-  // mehrere Leerzeilen auf eine reduzieren
+  // leere Zeilen reduzieren
   .replace(/\n{2,}/g, "\n")
   .trim();
 
+// jetzt entscheiden: word-mode oder normal
 if (req.body?.subtitle_mode === "words" && cleanedSubtitleText && audioPath) {
-  // Wort-für-Wort-SRT aus dem bereinigten Text bauen
   const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
   fs.writeFileSync(subtitleFile, wordSrt, "utf8");
   hasSubtitles = true;
 } else if (cleanedSubtitleText) {
-  // oder: bereinigten Text/SRT so speichern
   fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
   hasSubtitles = true;
 }
 
-
-
-
-// 5) Untertitel-Filter NUR anhängen, wenn die Datei wirklich existiert
+// 5) Prüfen, ob die Datei WIRKLICH existiert
 const haveSubtitleFile = hasSubtitles && fs.existsSync(subtitleFile);
 
+// 6) Untertitel-Filter-Schnipsel nur, wenn Datei da ist
 const subFilter = haveSubtitleFile
   ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
   : "";
 
-
-
-
-
-    // 6) FFmpeg = Videos + optional Audio + Untertitel kombinieren
-    const cmd = `
+// 7) FFmpeg = Videos + optional Audio + evtl. Untertitel kombinieren
+const cmd = `
 ffmpeg -y -nostdin -loglevel error ${inputs} \
  -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]" \
  -map "[v]" \
  ${audioPath ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k` : `-an`} \
  -c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
 `.replace(/\s+/g, " ");
-
-    let result;
-    try {
-      result = await execp(cmd, { maxBuffer: 8 * 1024 * 1024 });
-    } catch (e) {
-      const errText = typeof e?.stderr === "string" ? e.stderr
-        : Buffer.isBuffer(e?.stderr) ? e.stderr.toString("utf8")
-        : e?.message || String(e);
-      console.error("FFmpeg error:", errText);
-      return res.status(500).json({ error: "FFmpeg failed", details: errText });
-    }
-
-    // 7) Falls FFmpeg „grün“ war, aber keine Datei schrieb
-    if (!fs.existsSync(out)) {
-      const stderrText = typeof result?.stderr === "string" ? result.stderr
-        : Buffer.isBuffer(result?.stderr) ? result.stderr.toString("utf8")
-        : "No stderr returned";
-      console.error("Output missing. FFmpeg stderr:", stderrText);
-      return res.status(500).json({ error: "Output file not created", details: stderrText });
-    }
 
     // 8) Datei zurückgeben
     const stat = fs.statSync(out);
