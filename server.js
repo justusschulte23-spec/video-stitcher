@@ -171,6 +171,10 @@ app.post("/stitch", async (req, res) => {
       haveSubtitleFile = true;
     }
 
+    // kleine Sicherheitspause, damit Datei sicher existiert
+await new Promise(r => setTimeout(r, 300));
+console.log("Subtitle file written:", fs.existsSync(subtitleFile), subtitleFile);
+
     // sicherheitshalber noch mal checken
     if (haveSubtitleFile && !fs.existsSync(subtitleFile)) {
       // dann doch nicht
