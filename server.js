@@ -175,7 +175,10 @@ if (req.body?.subtitle_mode === "words" && cleanedSubtitleText && audioPath) {
 
 
 
-const subFilter = hasSubtitles
+// 5) Untertitel-Filter NUR anhängen, wenn die Datei wirklich existiert
+const haveSubtitleFile = hasSubtitles && fs.existsSync(subtitleFile);
+
+const subFilter = haveSubtitleFile
   ? `,subtitles='${subtitleFile.replace(/\\/g, "/")}':force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
   : "";
 
