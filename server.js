@@ -178,15 +178,22 @@ let haveSubtitleFile = false;
       haveSubtitleFile = true;
     }
 
-    // kleine Sicherheitspause, damit Datei sicher existiert
-await new Promise(r => setTimeout(r, 300));
-console.log("Subtitle file written:", fs.existsSync(subtitleFile), subtitleFile);
+  await new Promise((r) => setTimeout(r, 300));
+let finalSrt = "";
+if (haveSubtitleFile && fs.existsSync(subtitleFile)) {
+  finalSrt = fs.readFileSync(subtitleFile, "utf8")
+    .replace(/^\uFEFF/, "")         // BOM weg
+    .replace(/\r\n/g, "\n")         // Windows -> Unix
+    .trim();
+  fs.writeFileSync(subtitleFile, finalSrt, "utf8");
+  console.log("Subtitle file written:", true, subtitleFile);
+  console.log("Subtitle content >>>");
+  console.log(finalSrt);
+} else {
+  haveSubtitleFile = false;
+  console.log("Subtitle file missing after write:", subtitleFile);
+}
 
-    // sicherheitshalber noch mal checken
-    if (haveSubtitleFile && !fs.existsSync(subtitleFile)) {
-      // dann doch nicht
-      haveSubtitleFile = false;
-    }
 
     // 7) Subtitle-Filter bauen (ohne Quotes um den Pfad!)
     const subFilter = haveSubtitleFile
