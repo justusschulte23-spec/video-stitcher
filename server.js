@@ -15,21 +15,23 @@ app.use(express.json({ limit: "5mb" }));
 const WORKDIR = process.cwd();              // z.B. /app
 const TMP = "/tmp";                         // für Videos ok
 
-// 1) Fonts registrieren (du hast sie in /app/fonts/…)
-const FONTS_DIR = path.join(WORKDIR, "fonts");
-try {
-  if (fs.existsSync(FONTS_DIR)) {
-    console.log("Registering local Anton font ...");
-    await execp(
-      `mkdir -p /usr/share/fonts/truetype/custom && cp ${FONTS_DIR}/*.ttf /usr/share/fonts/truetype/custom && fc-cache -fv`
-    );
-    console.log("Anton font registered.");
-  } else {
-    console.log("No fonts/ dir found, skipping font registration.");
-  }
-} catch (e) {
-  console.warn("Font registration skipped:", e.message);
-}
+// 1) Fonts registrieren – vorerst deaktiviert, weil Railway beim Start sonst zu lange blockt
+// const FONTS_DIR = path.join(WORKDIR, "fonts");
+// try {
+//   if (fs.existsSync(FONTS_DIR)) {
+//     console.log("Registering local Anton font ...");
+//     await execp(
+//       `mkdir -p /usr/share/fonts/truetype/custom && cp ${FONTS_DIR}/*.ttf /usr/share/fonts/truetype/custom && fc-cache -fv`
+//     );
+//     console.log("Anton font registered.");
+//   } else {
+//     console.log("No fonts/ dir found, skipping font registration.");
+//   }
+// } catch (e) {
+//   console.warn("Font registration skipped:", e.message);
+// }
+
+
 
 // -----------------------------------------------------------------------------
 // Helper
