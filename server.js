@@ -169,14 +169,22 @@ let haveSubtitleFile = false;
       .replace(/\n{2,}/g, "\n")
       .trim();
 
-    if (subtitleMode === "words" && cleanedSubtitleText && audioPath) {
-      const srt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
-      fs.writeFileSync(subtitleFile, srt, "utf8");
-      haveSubtitleFile = true;
-    } else if (cleanedSubtitleText) {
-      fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
-      haveSubtitleFile = true;
-    }
+    // prüfen, ob der Text schon echte SRT-Timecodes hat
+const looksLikeSrt = /^\d{1,4}\s*$/m.test(cleanedSubtitleText) ||
+  /^\d{2}:\d{2}:\d{2},\d{3}\s+-->/m.test(cleanedSubtitleText);
+
+if (looksLikeSrt) {
+  // echte SRT → einfach speichern
+  fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
+  haveSubtitleFile = true;
+} else if (cleanedSubtitleText && audioPath) {
+  // kein SRT → aus Fließtext Wort-SRT bauen
+  const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
+  fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+  haveSubtitleFile = true;
+} else {
+  haveSubtitleFile = false;
+}
 
   await new Promise((r) => setTimeout(r, 300));
 let finalSrt = "";
