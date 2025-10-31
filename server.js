@@ -145,9 +145,14 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 6) Untertitel-Datei JETZT nicht nach /tmp, sondern ins Arbeitsverzeichnis
-    const subtitleFile = path.join(WORKDIR, "subtitles.srt");
-    let haveSubtitleFile = false;
+    // 6) Untertitel-Datei in sicheres, lesbares Verzeichnis schreiben
+const SUBDIR = "/tmp/subs";
+if (!fs.existsSync(SUBDIR)) {
+  fs.mkdirSync(SUBDIR, { recursive: true });
+}
+const subtitleFile = path.join(SUBDIR, "subtitles.srt");
+let haveSubtitleFile = false;
+
 
     // n8n-SRT säubern
     const cleanedSubtitleText = (subtitlesText || "")
