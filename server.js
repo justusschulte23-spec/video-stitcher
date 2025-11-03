@@ -138,10 +138,17 @@ app.post("/stitch", async (req, res) => {
     let haveSubtitleFile = false;
 
     // Cleaning (BOM, CRLF)
-    const cleanedText = (subtitlesText || "")
-      .replace(/^\uFEFF/, "")
-      .replace(/\r\n/g, "\n")
-      .trim();
+   const cleanedText = (subtitlesText || "")
+  .replace(/^\uFEFF/, "")
+  .replace(/\r\n/g, "\n")
+  // SRT-Index-Zeilen (nur Zahlen) killen
+  .replace(/^\d+\s*$/gm, "")
+  // SRT-Timecode-Zeilen killen
+  .replace(/^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,\.]\d{3}.*$/gm, "")
+  // Leerzeilen reduzieren
+  .replace(/^\s*$/gm, "")
+  .trim();
+
 
     if (cleanedText) {
       // Timing-Quelle: Audio bevorzugt, sonst 1. Clip
@@ -164,11 +171,11 @@ app.post("/stitch", async (req, res) => {
     // 6) Subtitle-Filter (keine Quotes um den Pfad!)
     // Shorts-Layout: unten mittig, gut lesbar
     const subFilter = haveSubtitleFile
-      ? `,subtitles=${subtitleFile.replace(
-          /\\/g,
-          "/"
-        )}:force_style='FontName=Anton,FontSize=64,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=6,Shadow=0,Alignment=2,MarginV=240'`
-      : "";
+  ? `,subtitles=${subtitleFile.replace(
+      /\\/g, "/"
+    )}:force_style='FontName=Anton,FontSize=48,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=6,Shadow=0,Alignment=2,MarginV=280'`
+  : "";
+
 
     console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
 
