@@ -182,7 +182,8 @@ app.post("/stitch", async (req, res) => {
     // 7) FFmpeg-Kommando bauen & ausführen
     const cmd = `
       ffmpeg -y -nostdin -loglevel error ${inputs}
-      -filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]"
+      -filter_complex "${filter};[vout]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p${subFilter}[v]
+"
       -map "[v]"
       ${audioPath ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k` : `-an`}
       -c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
