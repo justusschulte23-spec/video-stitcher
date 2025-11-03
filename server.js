@@ -170,10 +170,10 @@ app.post("/stitch", async (req, res) => {
 
     // 6) Subtitle-Filter (keine Quotes um den Pfad!)
     // Shorts-Layout: unten mittig, gut lesbar
-    const subFilter = haveSubtitleFile
+   const subFilter = haveSubtitleFile
   ? `,subtitles=${subtitleFile.replace(
       /\\/g, "/"
-    )}:force_style='FontName=Anton,FontSize=48,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=6,Shadow=0,Alignment=2,MarginV=280'`
+    )}:force_style='FontName=Anton,FontSize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=5,Shadow=0,Alignment=2,MarginV=420'`
   : "";
 
 
