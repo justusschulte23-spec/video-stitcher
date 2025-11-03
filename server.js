@@ -165,30 +165,40 @@ const cleanedSubtitleText = rawSubtitleText
   .trim();
 
 if (cleanedSubtitleText && audioPath) {
-  // IMMER Wort-SRT bauen, sobald Text + Audio da ist
-  const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
-  fs.writeFileSync(subtitleFile, wordSrt, "utf8");
-  haveSubtitleFile = true;
-} else if (cleanedSubtitleText) {
-  // Fallback: einfach speichern
-  fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
-  haveSubtitleFile = true;
-}
+  // --- SRT immer bauen, wenn Text vorhanden ist ---
+const SUBDIR = "/tmp/subs";
+if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
+const subtitleFile = path.join(SUBDIR, "subtitles.srt");
 
-// Sicherheits-Pause
-await new Promise((r) => setTimeout(r, 200));
-console.log("Subtitle file written:", haveSubtitleFile, subtitleFile);
-if (haveSubtitleFile && !fs.existsSync(subtitleFile)) {
-  haveSubtitleFile = false;
+let haveSubtitleFile = false;
+
+const cleanedSubtitleText = (subtitlesText || "")
+  .replace(/^\uFEFF/, "")
+  .replace(/\r\n/g, "\n")
+  .trim();
+
+if (cleanedSubtitleText) {
+  // Für die Wort-Timings: nimm Audio, sonst notfalls den 1. Clip (ffprobe geht auch auf MP4)
+  const baseForTiming = audioPath || local[0];
+  const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, baseForTiming);
+  fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+
+  // Mini-Pause + Existenzcheck
+  await new Promise(r => setTimeout(r, 200));
+  haveSubtitleFile = fs.existsSync(subtitleFile);
+  console.log("Subtitle file written:", haveSubtitleFile, subtitleFile);
+  console.log("Subtitle content >>>\n" + fs.readFileSync(subtitleFile, "utf8"));
+} else {
+  console.log("No subtitle text provided, skipping subtitles.");
 }
 
     // 7) Subtitle-Filter bauen (ohne Quotes um den Pfad!)
-    const subFilter = haveSubtitleFile
-      ? `,subtitles=${subtitleFile.replace(
-          /\\/g,
-          "/"
-        )}:force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
-      : "";
+   const subFilter = haveSubtitleFile
+  ? `,subtitles=${subtitleFile.replace(/\\/g,"/")}:force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=300'`
+  : "";
+
+console.log("Using subtitle filter?", haveSubtitleFile, subFilter);
+
 
     // 8) FFmpeg-Kommando
     const cmd = `
