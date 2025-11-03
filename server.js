@@ -147,7 +147,7 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 6) Untertitel-Datei in sicheres, lesbares Verzeichnis schreiben
+   // 6) Untertitel-Datei in sicheres, lesbares Verzeichnis schreiben
 const SUBDIR = "/tmp/subs";
 if (!fs.existsSync(SUBDIR)) {
   fs.mkdirSync(SUBDIR, { recursive: true });
@@ -155,53 +155,32 @@ if (!fs.existsSync(SUBDIR)) {
 const subtitleFile = path.join(SUBDIR, "subtitles.srt");
 let haveSubtitleFile = false;
 
+// rohen Text holen
+const rawSubtitleText = subtitlesText || "";
 
-    // n8n-SRT säubern
-    const cleanedSubtitleText = (subtitlesText || "")
-      // timecodes
-      .replace(
-        /^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}.*$/gm,
-        ""
-      )
-      // nummern
-      .replace(/^\d+\s*$/gm, "")
-      // mehrfach-leerzeilen
-      .replace(/\n{2,}/g, "\n")
-      .trim();
+// Cleaning ein bisschen, aber nicht alles wegwerfen
+const cleanedSubtitleText = rawSubtitleText
+  .replace(/^\uFEFF/, "")
+  .replace(/\r\n/g, "\n")
+  .trim();
 
-    // prüfen, ob der Text schon echte SRT-Timecodes hat
-const looksLikeSrt = /^\d{1,4}\s*$/m.test(cleanedSubtitleText) ||
-  /^\d{2}:\d{2}:\d{2},\d{3}\s+-->/m.test(cleanedSubtitleText);
-
-if (looksLikeSrt) {
-  // echte SRT → einfach speichern
-  fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
-  haveSubtitleFile = true;
-} else if (cleanedSubtitleText && audioPath) {
-  // kein SRT → aus Fließtext Wort-SRT bauen
+if (cleanedSubtitleText && audioPath) {
+  // IMMER Wort-SRT bauen, sobald Text + Audio da ist
   const wordSrt = await buildWordSRTFromText(cleanedSubtitleText, audioPath);
   fs.writeFileSync(subtitleFile, wordSrt, "utf8");
   haveSubtitleFile = true;
-} else {
-  haveSubtitleFile = false;
+} else if (cleanedSubtitleText) {
+  // Fallback: einfach speichern
+  fs.writeFileSync(subtitleFile, cleanedSubtitleText, "utf8");
+  haveSubtitleFile = true;
 }
 
-  await new Promise((r) => setTimeout(r, 300));
-let finalSrt = "";
-if (haveSubtitleFile && fs.existsSync(subtitleFile)) {
-  finalSrt = fs.readFileSync(subtitleFile, "utf8")
-    .replace(/^\uFEFF/, "")         // BOM weg
-    .replace(/\r\n/g, "\n")         // Windows -> Unix
-    .trim();
-  fs.writeFileSync(subtitleFile, finalSrt, "utf8");
-  console.log("Subtitle file written:", true, subtitleFile);
-  console.log("Subtitle content >>>");
-  console.log(finalSrt);
-} else {
+// Sicherheits-Pause
+await new Promise((r) => setTimeout(r, 200));
+console.log("Subtitle file written:", haveSubtitleFile, subtitleFile);
+if (haveSubtitleFile && !fs.existsSync(subtitleFile)) {
   haveSubtitleFile = false;
-  console.log("Subtitle file missing after write:", subtitleFile);
 }
-
 
     // 7) Subtitle-Filter bauen (ohne Quotes um den Pfad!)
     const subFilter = haveSubtitleFile
