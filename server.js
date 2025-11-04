@@ -131,50 +131,46 @@ app.post("/stitch", async (req, res) => {
     const out = path.join(TMP, "stitched.mp4");
 
     // 5) Untertitel-Datei erzeugen (immer SRT bauen, sobald Text da ist)
-    const SUBDIR = "/tmp/subs";
-    if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
-    const subtitleFile = path.join(SUBDIR, "subtitles.srt");
+    // --- Untertitel-Datei sicher schreiben (immer in /tmp/subs) ---
+const SUBDIR = "/tmp/subs";
+if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
+const subtitleFile = path.join(SUBDIR, "subtitles.srt");
+let haveSubtitleFile = false;
 
-    let haveSubtitleFile = false;
-
-    // Cleaning (BOM, CRLF)
-   const cleanedText = (subtitlesText || "")
+// 1) Cleaning: SRT-Index/Timecodes raus, nur Text behalten
+const cleanedText = (subtitlesText || "")
   .replace(/^\uFEFF/, "")
   .replace(/\r\n/g, "\n")
-  // SRT-Index-Zeilen (nur Zahlen) killen
-  .replace(/^\d+\s*$/gm, "")
-  // SRT-Timecode-Zeilen killen
-  .replace(/^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,\.]\d{3}.*$/gm, "")
-  // Leerzeilen reduzieren
-  .replace(/^\s*$/gm, "")
+  .replace(/^\d+\s*$/gm, "")                                                        // Index-Zeilen killen
+  .replace(/^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,\.]\d{3}.*$/gm, "") // Timecodes killen
+  .replace(/^\s*$/gm, "")                                                           // leere Zeilen raus
   .trim();
 
+if (cleanedText) {
+  // 2) Wort-Timings auf Basis von Audio, sonst 1. Clip
+  const baseForTiming = audioPath || local[0];
+  const wordSrt = await buildWordSRTFromText(cleanedText, baseForTiming);
 
-    if (cleanedText) {
-      // Timing-Quelle: Audio bevorzugt, sonst 1. Clip
-      const timingSource = audioPath || local[0];
-      const wordSrt = await buildWordSRTFromText(cleanedText, timingSource);
-      fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+  fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+  await new Promise(r => setTimeout(r, 150)); // kurze Pause für FS
+  haveSubtitleFile = fs.existsSync(subtitleFile);
 
-      // kurze Pause + Existenzcheck
-      await new Promise((r) => setTimeout(r, 150));
-      haveSubtitleFile = fs.existsSync(subtitleFile);
-      console.log("Subtitle file written:", haveSubtitleFile, subtitleFile);
-      if (haveSubtitleFile) {
-        const preview = fs.readFileSync(subtitleFile, "utf8").split("\n").slice(0, 8).join("\n");
-        console.log("Subtitle preview >>>\n" + preview);
-      }
-    } else {
-      console.log("No subtitle text provided, skipping subtitles.");
-    }
+  console.log("SRT geschrieben?", haveSubtitleFile, subtitleFile);
+  if (haveSubtitleFile) {
+    const preview = fs.readFileSync(subtitleFile, "utf8").split("\n").slice(0, 8).join("\n");
+    console.log("SRT preview >>>\n" + preview);
+  }
+} else {
+  console.log("Kein Subtitle-Text geliefert – skip.");
+}
+
 
     // 6) Subtitle-Filter (keine Quotes um den Pfad!)
     // Shorts-Layout: unten mittig, gut lesbar
    const subFilter = haveSubtitleFile
-  ? `,subtitles=${subtitleFile.replace(
-      /\\/g, "/"
-    )}:force_style='FontName=Anton,FontSize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=5,Shadow=0,Alignment=2,MarginV=420'`
+  ? `,subtitles=${subtitleFile.replace(/\\/g,"/")}:force_style='FontName=Anton,FontSize=38,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=5,Shadow=0,Alignment=2,MarginV=160'`
   : "";
+
 
 
     console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
@@ -182,7 +178,8 @@ app.post("/stitch", async (req, res) => {
     // 7) FFmpeg-Kommando bauen & ausführen
     const cmd = `
       ffmpeg -y -nostdin -loglevel error ${inputs}
-      -filter_complex "${filter};[vout]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p${subFilter}[v]
+     -filter_complex "${filter};[vout]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2,fps=30,format=yuv420p${subFilter}[v]" \
+
 "
       -map "[v]"
       ${audioPath ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k` : `-an`}
