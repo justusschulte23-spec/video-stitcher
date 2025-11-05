@@ -167,8 +167,8 @@ if (cleanedText) {
 
     // 6) Subtitle-Filter (keine Quotes um den Pfad!)
     // Shorts-Layout: unten mittig, gut lesbar
-   const subFilter = haveSubtitleFile
-  ? `,subtitles=${subtitleFile.replace(/\\/g,"/")}:force_style='FontName=Anton,FontSize=38,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=5,Shadow=0,Alignment=2,MarginV=160'`
+  const subFilter = haveSubtitleFile
+  ? `,subtitles=${subtitleFile.replace(/\\/g,"/")}:force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=120'`
   : "";
 
 
@@ -176,15 +176,18 @@ if (cleanedText) {
     console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
 
     // 7) FFmpeg-Kommando bauen & ausführen
-    const cmd = `
-      ffmpeg -y -nostdin -loglevel error ${inputs}
-     -filter_complex "${filter};[vout]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2,fps=30,format=yuv420p${subFilter}[v]" \
-
-"
-      -map "[v]"
-      ${audioPath ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k` : `-an`}
-      -c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest "${out}"
-    `.replace(/\s+/g, " ");
+    // 7) FFmpeg-Kommando bauen & ausführen
+const cmd = [
+  'ffmpeg -y -nostdin -loglevel error',
+  inputs,
+  `-filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]"`,
+  '-map "[v]"',
+  audioPath
+    ? `-map 3:a -filter:a aresample=48000,volume=${audioGain} -c:a aac -b:a 192k`
+    : '-an',
+  '-c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest',
+  `"${out}"`
+].join(' ');
 
     let ff;
     try {
