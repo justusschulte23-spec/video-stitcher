@@ -168,7 +168,7 @@ if (cleanedText) {
     // 6) Subtitle-Filter (keine Quotes um den Pfad!)
     // Shorts-Layout: unten mittig, gut lesbar
   const subFilter = haveSubtitleFile
-  ? `,subtitles=${subtitleFile.replace(/\\/g,"/")}:force_style='FontName=Anton,FontSize=56,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=120'`
+  ? `,subtitles=${subtitleFile.replace(/\\/g,"/")}:force_style='FontName=Anton,FontSize=46,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=60'
   : "";
 
 
