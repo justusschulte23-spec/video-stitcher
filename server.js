@@ -14,6 +14,24 @@ app.use(express.json({ limit: "5mb" }));
 // Verzeichnisse
 const TMP = "/tmp"; // OK für Railway
 
+// Fonts registrieren (Anton)
+const WORKDIR = process.cwd();
+const FONTS_DIR = path.join(WORKDIR, "fonts");
+
+try {
+  if (fs.existsSync(FONTS_DIR)) {
+    console.log("Registering local Anton font ...");
+    await execp(
+      `mkdir -p /usr/share/fonts/truetype/custom && cp ${FONTS_DIR}/*.ttf /usr/share/fonts/truetype/custom && fc-cache -fv`
+    );
+    console.log("Anton font registered.");
+  } else {
+    console.log("No fonts/ dir found, skipping font registration.");
+  }
+} catch (e) {
+  console.warn("Font registration skipped:", e.message);
+}
+
 // ------------------------------- Helpers ------------------------------------
 
 async function downloadToFile(url, outPath) {
