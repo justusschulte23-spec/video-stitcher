@@ -184,59 +184,54 @@ if (cleanedText) {
 
 
     // 6) Subtitle-Filter (keine Quotes um den Pfad!)
-    // Shorts-Layout: unten mittig, gut lesbar
-  const subFilter = haveSubtitleFile
-  ? `,subtitles=${subtitleFile.replace(/\\/g,"/")}:force_style='FontName=Anton,FontSize=46,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=60'
+// Shorts-Layout: unten mittig, gut lesbar
+const subFilter = haveSubtitleFile
+  ? `,subtitles=${subtitleFile.replace(/\\/g, "/")}:force_style='FontName=Anton,FontSize=40,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=120'`
   : "";
 
+console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
 
-
-    console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
-
-    // 7) FFmpeg-Kommando bauen & ausführen
-    // 7) FFmpeg-Kommando bauen & ausführen
+// 7) FFmpeg-Kommando bauen & ausführen
 const cmd = [
-  'ffmpeg -y -nostdin -loglevel error',
+  "ffmpeg -y -nostdin -loglevel error",
   inputs,
   `-filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]"`,
   '-map "[v]"',
   audioPath
-    ? `-map 3:a -filter:a aresample=48000,volume=${audioGain} -c:a aac -b:a 192k`
-    : '-an',
-  '-c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest',
+    ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k`
+    : "-an",
+  "-c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest",
   `"${out}"`
-].join(' ');
+]
+  .join(" ")
+  .replace(/\s+/g, " ");
 
-    let ff;
-    try {
-      ff = await execp(cmd, { maxBuffer: 16 * 1024 * 1024 });
-    } catch (e) {
-      console.error("FFmpeg error:", e.stderr || e.message || e);
-      return res.status(500).json({
-        error: "FFmpeg failed",
-        details: e.stderr || String(e),
-      });
-    }
+let ff;
+try {
+  ff = await execp(cmd, { maxBuffer: 16 * 1024 * 1024 });
+} catch (e) {
+  console.error("FFmpeg error:", e.stderr || e.message || e);
+  return res.status(500).json({
+    error: "FFmpeg failed",
+    details: e.stderr || String(e),
+  });
+}
 
-    if (!fs.existsSync(out)) {
-      console.error("Output missing. FFmpeg stderr:", ff?.stderr);
-      return res.status(500).json({
-        error: "Output file not created",
-        details: ff?.stderr || "no stderr",
-      });
-    }
+if (!fs.existsSync(out)) {
+  console.error("Output missing. FFmpeg stderr:", ff?.stderr);
+  return res.status(500).json({
+    error: "Output file not created",
+    details: ff?.stderr || "no stderr",
+  });
+}
 
-    // 8) Datei zurückgeben
-    const stat = fs.statSync(out);
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Length", stat.size);
-    res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
-    fs.createReadStream(out).pipe(res);
-  } catch (err) {
-    console.error("Server error:", err);
-    return res.status(500).json({ error: String(err?.message || err) });
-  }
-});
+// 8) Datei zurückgeben
+const stat = fs.statSync(out);
+res.setHeader("Content-Type", "video/mp4");
+res.setHeader("Content-Length", stat.size);
+res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
+fs.createReadStream(out).pipe(res);
+
 
 // ------------------------------ Server start ---------------------------------
 
