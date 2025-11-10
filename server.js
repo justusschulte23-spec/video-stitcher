@@ -165,12 +165,15 @@ app.post("/stitch", async (req, res) => {
       console.log("Kein Subtitle-Text geliefert – skip.");
     }
 
-    // 6) Subtitle-Feintuning (kleiner + etwas tiefer) + Fontsdir
-    const subFilter = haveSubtitleFile
-      ? `,subtitles=${escPathForFilter(subtitleFile)}:force_style=FontName=Anton,FontSize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=64:fontsdir=/app/fonts`
-      : "";
+    // 6) Subtitle-Feintuning (mit Quotes um force_style!)
+const forceStyle =
+  "Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=64";
 
-    console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
+const subFilter = haveSubtitleFile
+  ? `,subtitles=${escPathForFilter(subtitleFile)}:force_style='${forceStyle}':fontsdir=/app/fonts`
+  : "";
+
+console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
 
     // 7) FFmpeg-Args bauen (spawn, kein Shell-String)
     const args = [
