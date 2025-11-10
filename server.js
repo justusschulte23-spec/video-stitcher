@@ -2,6 +2,7 @@
 
 import express from "express";
 import { exec as execCb } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs";
 import { promisify } from "util";
 import path from "path";
@@ -91,6 +92,12 @@ async function buildWordSRTFromText(text, timingFile) {
 }
 
 // ------------------------------- Route --------------------------------------
+
+function escPathForFilter(p) {
+  // In FFmpeg-Filter-Argumenten ':' escapen, Backslashes doppeln
+  return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+}
+
 
 app.post("/stitch", async (req, res) => {
   // lange Requests erlauben (Railway 502 vermeiden)
@@ -183,47 +190,90 @@ if (cleanedText) {
 }
 
 
-    // 6) Subtitle-Filter (keine Quotes um den Pfad!)
-// Shorts-Layout: unten mittig, gut lesbar
+   // 6) Subtitle-Filter (spawn: keine Shell-Quotes nötig) – kleiner + tiefer
 const subFilter = haveSubtitleFile
-  ? `,subtitles=${subtitleFile.replace(/\\/g, "/")}:force_style='FontName=Anton,FontSize=40,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=120'`
+  ? `,subtitles=${escPathForFilter(subtitleFile)}:force_style=FontName=Anton,FontSize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=64:fontsdir=/app/fonts`
   : "";
+
+
 
 console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
 
-// 7) FFmpeg-Kommando bauen & ausführen
-const cmd = [
-  "ffmpeg -y -nostdin -loglevel error",
-  inputs,
-  `-filter_complex "${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]"`,
-  '-map "[v]"',
-  audioPath
-    ? `-map 3:a -filter:a "aresample=48000,volume=${audioGain}" -c:a aac -b:a 192k`
-    : "-an",
-  "-c:v libx264 -preset ultrafast -crf 23 -profile:v high -level 4.0 -movflags +faststart -shortest",
-  `"${out}"`
-]
-  .join(" ")
-  .replace(/\s+/g, " ");
+// 7) FFmpeg-Args bauen (spawn, kein Shell-String)
+const args = [
+  "-y", "-nostdin", "-loglevel", "error",
 
-let ff;
-try {
-  ff = await execp(cmd, { maxBuffer: 16 * 1024 * 1024 });
-} catch (e) {
-  console.error("FFmpeg error:", e.stderr || e.message || e);
-  return res.status(500).json({
-    error: "FFmpeg failed",
-    details: e.stderr || String(e),
-  });
-}
+  // Inputs
+  ...local.flatMap((p) => ["-i", p]),
+  ...(audioPath ? ["-i", audioPath] : []),
 
-if (!fs.existsSync(out)) {
-  console.error("Output missing. FFmpeg stderr:", ff?.stderr);
-  return res.status(500).json({
-    error: "Output file not created",
-    details: ff?.stderr || "no stderr",
-  });
-}
+  // Filter
+  "-filter_complex",
+  `${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]`,
+
+  // Mapping
+  "-map", "[v]",
+  ...(audioPath
+    ? ["-map", `${local.length}:a?`, "-filter:a", `aresample=48000,volume=${audioGain}`, "-c:a", "aac", "-b:a", "192k"]
+    : ["-an"]),
+
+  // Video & Container
+  "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+  "-profile:v", "high", "-level", "4.0",
+  "-movflags", "+faststart",
+  "-shortest",
+
+  out
+];
+
+console.log("ffmpeg args >>>", JSON.stringify(args));
+
+const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+
+let ffErr = "";
+ff.stderr.on("data", (d) => { const s = d.toString(); ffErr += s; process.stderr.write(`[ffmpeg] ${s}`); });
+
+ff.on("error", (e) => {
+  console.error("FFmpeg spawn error:", e);
+  return res.status(500).json({ error: "FFmpeg spawn error", details: String(e) });
+});
+
+ff.on("close", (code) => {
+  if (code !== 0) {
+    console.error("FFmpeg exited with code", code);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: "FFmpeg failed", details: ffErr || `exit ${code}` });
+    }
+  }
+});
+
+// Output streamen (kein Zwischen-File nötig, aber wir behalten deine Datei-Variante bei)
+// Wenn du lieber Datei streamen willst, dann statt 'out' als Ziel 'pipe:1' verwenden.
+ff.on("spawn", () => {
+  // Wir haben oben 'out' als Dateipfad gewählt – falls du lieber streamen willst:
+  // -> args letzte Position auf 'pipe:1' ändern und hier ff.stdout.pipe(res)
+  // Aktuell: Wir warten auf Prozessende und senden dann die Datei (wie bisher).
+});
+
+// Warten bis FFmpeg fertig ist, dann Datei senden
+ff.on("close", async (code) => {
+  if (code !== 0) return; // bereits behandelt
+  try {
+    if (!fs.existsSync(out)) {
+      console.error("Output missing after ffmpeg");
+      if (!res.headersSent) return res.status(500).json({ error: "Output file not created" });
+      return;
+    }
+    const stat = fs.statSync(out);
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", stat.size);
+    res.setHeader("Content-Disposition", 'attachment; filename="stitched.mp4"');
+    fs.createReadStream(out).pipe(res);
+  } catch (e) {
+    console.error("Send output failed:", e);
+    if (!res.headersSent) res.status(500).json({ error: "send_failed", details: String(e) });
+  }
+});
 
 // 8) Datei zurückgeben
 const stat = fs.statSync(out);
