@@ -91,7 +91,7 @@ app.post("/stitch", async (req, res) => {
   try {
     const clips = req.body?.clips;
     const fade = Number(req.body?.fade ?? 0.5); // Sekunden
-    const { audioUrl, audioGain = 1.0 } = req.body || {};
+    const { audioUrl, audioGain = 1.0, subtitleDelay = 0.4, targetDuration = 32, fadeOut = 2 } = req.body || {};
     const subtitlesText = req.body?.subtitles_text || ""; // plain Text ODER SRT
 
     if (!Array.isArray(clips) || clips.length < 2) {
@@ -122,6 +122,13 @@ app.post("/stitch", async (req, res) => {
     for (const p of local) durations.push(await probeDurationSeconds(p));
     const d0 = durations[0] ?? 10.0;
     const d1 = durations[1] ?? 10.0;
+
+    // Geschätzte Gesamtdauer (XFades überlappen um 'fade' Sekunden)
+    const clipCount = local.length;
+    const sumDur = durations.reduce((a, b) => a + (b || 0), 0);
+    const estTotal = Math.max(0, sumDur - (clipCount - 1) * fade); // grob, reicht fürs Padding
+    const padNeeded = Math.max(0, Number(targetDuration) - estTotal); // Sekunden zum Auffüllen
+    const fadeStart = Math.max(0, Number(targetDuration) - Number(fadeOut)); // Startzeit des Fadeouts
 
     // 4) Filtergraph: Crossfades
     const filter =
@@ -165,12 +172,12 @@ app.post("/stitch", async (req, res) => {
       console.log("Kein Subtitle-Text geliefert – skip.");
     }
 
-    // 6) Subtitle-Feintuning (mit Quotes um force_style!)
+    // 6) Subtitle-Feintuning (mit Delay si=... und Quotes um force_style!)
 const forceStyle =
   "Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=64";
 
 const subFilter = haveSubtitleFile
-  ? `,subtitles=${escPathForFilter(subtitleFile)}:force_style='${forceStyle}':fontsdir=/app/fonts`
+  ? `,subtitles=${escPathForFilter(subtitleFile)}:si=${Number(subtitleDelay).toFixed(2)}:force_style='${forceStyle}':fontsdir=/app/fonts`
   : "";
 
 console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" : "(disabled)");
@@ -185,7 +192,10 @@ console.log("Using subtitle filter?", haveSubtitleFile, subFilter ? "(enabled)" 
 
       // Filter
       "-filter_complex",
-      `${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}[v]`,
+      `${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}` +
+  (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
+  `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[v]`,
+
 
       // Mapping
       "-map", "[v]",
