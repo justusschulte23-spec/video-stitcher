@@ -94,13 +94,14 @@ app.post("/stitch", async (req, res) => {
     const fade = Number(req.body?.fade ?? 0.5);
 
     // <<< geändert – neue Defaults
-    const {
-      audioUrl,
-      audioGain = 1.0,
-      subtitleDelay = 0.5,     // war 0.4
-      targetDuration = 28,     // 27s Inhalt + 1s Fadeout
-      fadeOut = 1              // vorher 2s
-    } = req.body || {};
+   const {
+  audioUrl,
+  audioGain = 1.0,
+  subtitleDelay = 0.4,
+  targetDuration = 28, // 3 x 9s Clips ≈ 27s + 1s Puffer
+  fadeOut = 1          // 1s Fade-Out am Ende
+} = req.body || {};
+
 
     const subtitlesText = req.body?.subtitles_text || "";
 
@@ -189,9 +190,19 @@ app.post("/stitch", async (req, res) => {
       `${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}` +
       (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
       `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[v]`,
+            // Mapping
       "-map", "[v]",
       ...(audioPath
-        ? ["-map", `${local.length}:a?`, "-filter:a", `aresample=48000,volume=${audioGain}`, "-c:a", "aac", "192k"]
+        ? [
+            "-map",
+            `${local.length}:a?`,
+            "-filter:a",
+            `aresample=48000,volume=${audioGain}`,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+          ]
         : ["-an"]),
       "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
       "-profile:v", "high", "-level", "4.0",
