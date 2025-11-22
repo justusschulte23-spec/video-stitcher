@@ -97,9 +97,9 @@ app.post("/stitch", async (req, res) => {
    const {
   audioUrl,
   audioGain = 1.0,
-  subtitleDelay = 0.2,
-  targetDuration = 28, // 3 x 9s Clips ≈ 27s + 1s Puffer
-  fadeOut = 1          // 1s Fade-Out am Ende
+  subtitleDelay = 0.1,
+  targetDuration = 29, // 3 x 9s Clips ≈ 27s + 1s Puffer
+  fadeOut = 2          // 1s Fade-Out am Ende
 } = req.body || {};
 
 
