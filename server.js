@@ -175,8 +175,8 @@ app.post("/stitch", async (req, res) => {
     }
 
     const forceStyle =
-  "Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H7F000000&,BorderStyle=3,Outline=0,Shadow=0,Alignment=2,MarginV=64,BackColour=&H4F000000&
-";
+  "Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H7F000000&,BorderStyle=3,Outline=0,Shadow=0,Alignment=2,MarginV=64,BackColour=&H4F000000&";
+
 
 
     const subFilter = haveSubtitleFile
