@@ -175,15 +175,15 @@ app.post("/stitch", async (req, res) => {
     }
 
    const forceStyle =
-  "Fontname=Anton,Fontsize=36," +
-  "PrimaryColour=&H70FFFFFF&," + 
-  "OutlineColour=&H70D4AF37&," + 
-  "BorderStyle=1," +
-  "Outline=2," +
+  "Fontname=Anton," +
+  "Fontsize=36," +
+  "PrimaryColour=&H00FFFFFF&," +                 // Weiße Schrift
+  "OutlineColour=&HAA74D514&," +                 // Goldener Rand (mit 66% Deckkraft)
+  "BorderStyle=1," +                             // Nur Outline
+  "Outline=0.5," +                               // Haarbreit (super dünn)
   "Shadow=0," +
-  "Alignment=2," +
-  "MarginV=64";
-
+  "Alignment=2," +                               // Zentriert unten
+  "MarginV=64";                                  // Abstand zum Rand
 
 
 
