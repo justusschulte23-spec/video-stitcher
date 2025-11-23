@@ -174,16 +174,15 @@ app.post("/stitch", async (req, res) => {
       haveSubtitleFile = fs.existsSync(subtitleFile);
     }
 
-   const forceStyle =
-  "Fontname=Anton," +
-  "Fontsize=36," +
-  "PrimaryColour=&H00FFFFFF&," +                 // Weiße Schrift
-  "OutlineColour=&HAA74D514&," +                 // Goldener Rand (mit 66% Deckkraft)
-  "BorderStyle=1," +                             // Nur Outline
-  "Outline=0.5," +                               // Haarbreit (super dünn)
+  const forceStyle =
+  "Fontname=Anton,Fontsize=36," +
+  "PrimaryColour=&H00FFFFFF&," +         // Text weiß
+  "OutlineColour=&H0040A040&," +         // Gold-Ton (RGB 160,160,64 mit geringer Deckkraft)
+  "BorderStyle=1," +
+  "Outline=1," +                         // Dünner, haardünner Rahmen
   "Shadow=0," +
-  "Alignment=2," +                               // Zentriert unten
-  "MarginV=64";                                  // Abstand zum Rand
+  "Alignment=2," +
+  "MarginV=48";                          // 10% tiefer als vorher (vorher 64)
 
 
 
