@@ -174,8 +174,16 @@ app.post("/stitch", async (req, res) => {
       haveSubtitleFile = fs.existsSync(subtitleFile);
     }
 
-    const forceStyle =
-  "Fontname=Anton,Fontsize=36,PrimaryColour=&H00FFFFFF&,OutlineColour=&H7F000000&,BorderStyle=3,Outline=0,Shadow=0,Alignment=2,MarginV=64,BackColour=&H4F000000&";
+   const forceStyle =
+  "Fontname=Anton,Fontsize=36," +
+  "PrimaryColour=&H70FFFFFF&," + 
+  "OutlineColour=&H70D4AF37&," + 
+  "BorderStyle=1," +
+  "Outline=2," +
+  "Shadow=0," +
+  "Alignment=2," +
+  "MarginV=64";
+
 
 
 
