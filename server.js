@@ -175,14 +175,14 @@ app.post("/stitch", async (req, res) => {
     }
 
   const forceStyle =
-  "Fontname=Anton,Fontsize=36," +
-  "PrimaryColour=&H00FFFFFF&," +         // Text weiß
-  "OutlineColour=&H0040A040&," +         // Gold-Ton (RGB 160,160,64 mit geringer Deckkraft)
-  "BorderStyle=1," +
-  "Outline=1," +                         // Dünner, haardünner Rahmen
-  "Shadow=0," +
-  "Alignment=2," +
-  "MarginV=48";                          // 10% tiefer als vorher (vorher 64)
+"Fontname=Anton,Fontsize=36," +
+"PrimaryColour=&H00FFFFFF," +        // Text weiß
+"OutlineColour=&H0037AFD4," +        // GOLD (kein Grün, kein Blau)
+"BorderStyle=1," +
+"Outline=1," +                       // Dünner, sauberer Goldrand
+"Shadow=0," +
+"Alignment=2," +
+"MarginV=48";
 
 
 
