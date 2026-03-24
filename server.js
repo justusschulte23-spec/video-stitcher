@@ -9,11 +9,9 @@ import path from "path";
 const execp = promisify(execCb);
 
 const app = express();
-app.use(express.json({ limit: "10mb" })); // etwas großzügiger
+app.use(express.json({ limit: "10mb" }));
 
-// ------------------------------ Basics ---------------------------------------
-
-const TMP = "/tmp"; // Schreibbar auf Railway
+const TMP = "/tmp";
 
 // Healthcheck für Railway
 app.get("/health", (_req, res) => res.status(200).send("ok"));
@@ -34,30 +32,48 @@ async function probeDurationSeconds(filePath) {
   return Number.isFinite(s) && s > 0 ? s : 10.0;
 }
 
-// --- Untertitel-Generator -----------------------------------------------
-// wir strecken minimal (~8%), damit die Untertitel ruhiger laufen
-async function buildWordSRTFromText(text, timingFile) {
-  const probeCmd = `ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${timingFile}"`;
-  const { stdout } = await execp(probeCmd, { maxBuffer: 8 * 1024 * 1024 });
+// --- Whisper API transcription -------------------------------------------
 
-  const rawTotal = Math.max(0.1, parseFloat((stdout || "0").trim()) || 0);
+async function transcribeWithWhisper(audioPath) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY not set");
 
-  const stretchFactor = 1.08; // <<< geändert – Untertitel etwas langsamer
-  const total = rawTotal * stretchFactor;
+  const ext = path.extname(audioPath).slice(1).toLowerCase() || "mp3";
+  const mimeMap = {
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    webm: "audio/webm",
+    flac: "audio/flac",
+  };
+  const mime = mimeMap[ext] || "audio/mpeg";
 
-  const words = (text || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
+  const formData = new FormData();
+  const blob = new Blob([fs.readFileSync(audioPath)], { type: mime });
+  formData.append("file", blob, `audio.${ext}`);
+  formData.append("model", "whisper-1");
+  formData.append("response_format", "verbose_json");
+  formData.append("timestamp_granularities[]", "word");
 
+  const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: formData,
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Whisper API error ${resp.status}: ${errText}`);
+  }
+
+  const data = await resp.json();
+  return buildSRTFromWhisperWords(data.words || []);
+}
+
+function buildSRTFromWhisperWords(words) {
   if (!words.length) return "1\n00:00:00,000 --> 00:00:00,600\n \n";
 
-  let per = total / words.length;
-  per = Math.max(0.25, Math.min(1.2, per));
-
-  let t = 0;
-  let idx = 1;
   const pad = (n) => String(n).padStart(2, "0");
   const toTC = (sec) => {
     const h = Math.floor(sec / 3600);
@@ -68,11 +84,46 @@ async function buildWordSRTFromText(text, timingFile) {
   };
 
   let srt = "";
+  let idx = 1;
   for (const w of words) {
-    const start = toTC(t);
-    const end = toTC(Math.min(total, t + per));
-    srt += `${idx}\n${start} --> ${end}\n${w}\n\n`;
-    idx += 1;
+    const wordText = (w.word || "").trim();
+    if (!wordText) continue;
+    srt += `${idx}\n${toTC(w.start)} --> ${toTC(w.end)}\n${wordText}\n\n`;
+    idx++;
+  }
+  return srt || "1\n00:00:00,000 --> 00:00:00,600\n \n";
+}
+
+// --- Manual word-distribution SRT (fallback when no Whisper) ----------------
+
+async function buildWordSRTFromText(text, timingFile) {
+  const probeCmd = `ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${timingFile}"`;
+  const { stdout } = await execp(probeCmd, { maxBuffer: 8 * 1024 * 1024 });
+
+  const rawTotal = Math.max(0.1, parseFloat((stdout || "0").trim()) || 0);
+  const total = rawTotal * 1.08;
+
+  const words = (text || "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  if (!words.length) return "1\n00:00:00,000 --> 00:00:00,600\n \n";
+
+  let per = total / words.length;
+  per = Math.max(0.25, Math.min(1.2, per));
+
+  const pad = (n) => String(n).padStart(2, "0");
+  const toTC = (sec) => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    const ms = Math.round((sec - Math.floor(sec)) * 1000);
+    return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms).padStart(3, "0")}`;
+  };
+
+  let t = 0;
+  let idx = 1;
+  let srt = "";
+  for (const w of words) {
+    srt += `${idx}\n${toTC(t)} --> ${toTC(Math.min(total, t + per))}\n${w}\n\n`;
+    idx++;
     t += per;
     if (t >= total) break;
   }
@@ -92,16 +143,14 @@ app.post("/stitch", async (req, res) => {
   try {
     const clips = req.body?.clips;
     const fade = Number(req.body?.fade ?? 0.5);
-
-    // <<< geändert – neue Defaults
-   const {
-  audioUrl,
-  audioGain = 1.0,
-  subtitleDelay = 0.1,
-  targetDuration = 29, // 3 x 9s Clips ≈ 27s + 1s Puffer
-  fadeOut = 2          // 1s Fade-Out am Ende
-} = req.body || {};
-
+    const {
+      audioUrl,
+      audioGain = 1.0,
+      subtitleDelay = 0.1,
+      targetDuration = 29,
+      fadeOut = 2,
+      autoSubtitles = true,
+    } = req.body || {};
 
     const subtitlesText = req.body?.subtitles_text || "";
 
@@ -151,40 +200,55 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 5) Untertitel
+    // 5) Untertitel generieren
     const SUBDIR = "/tmp/subs";
     if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
 
     const subtitleFile = path.join(SUBDIR, "subtitles.srt");
     let haveSubtitleFile = false;
 
-    const cleanedText = (subtitlesText || "")
-      .replace(/^\uFEFF/, "")
-      .replace(/\r\n/g, "\n")
-      .replace(/^\d+\s*$/gm, "")
-      .replace(/^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,\.]\d{3}.*$/gm, "")
-      .replace(/^\s*$/gm, "")
-      .trim();
+    // Priority: manual text > Whisper auto-transcription > none
+    if (subtitlesText) {
+      // Manual text: clean & evenly distribute
+      const cleanedText = subtitlesText
+        .replace(/^\uFEFF/, "")
+        .replace(/\r\n/g, "\n")
+        .replace(/^\d+\s*$/gm, "")
+        .replace(/^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,\.]\d{3}.*$/gm, "")
+        .replace(/^\s*$/gm, "")
+        .trim();
 
-    if (cleanedText) {
-      const baseForTiming = audioPath || local[0];
-      const wordSrt = await buildWordSRTFromText(cleanedText, baseForTiming);
-      fs.writeFileSync(subtitleFile, wordSrt, "utf8");
-      await new Promise((r) => setTimeout(r, 150));
-      haveSubtitleFile = fs.existsSync(subtitleFile);
+      if (cleanedText) {
+        const baseForTiming = audioPath || local[0];
+        const wordSrt = await buildWordSRTFromText(cleanedText, baseForTiming);
+        fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+        await new Promise((r) => setTimeout(r, 150));
+        haveSubtitleFile = fs.existsSync(subtitleFile);
+      }
+    } else if (audioPath && autoSubtitles && process.env.OPENAI_API_KEY) {
+      // Auto-transcribe with Whisper for accurate word-level timing
+      try {
+        console.log("[whisper] transcribing audio...");
+        const whisperSrt = await transcribeWithWhisper(audioPath);
+        fs.writeFileSync(subtitleFile, whisperSrt, "utf8");
+        await new Promise((r) => setTimeout(r, 150));
+        haveSubtitleFile = fs.existsSync(subtitleFile);
+        console.log("[whisper] subtitle file written");
+      } catch (e) {
+        console.error("[whisper] transcription failed, skipping subtitles:", e.message);
+      }
     }
 
-  const forceStyle =
-"Fontname=Anton,Fontsize=36," +
-"PrimaryColour=&H00FFFFFF," +        // Text weiß
-"OutlineColour=&H0037AFD4," +        // GOLD (kein Grün, kein Blau)
-"BorderStyle=1," +
-"Outline=1," +                       // Dünner, sauberer Goldrand
-"Shadow=0," +
-"Alignment=2," +
-"MarginV=48";
-
-
+    // 6) Subtitle filter string
+    const forceStyle =
+      "Fontname=Anton,Fontsize=36," +
+      "PrimaryColour=&H00FFFFFF," +
+      "OutlineColour=&H0037AFD4," +
+      "BorderStyle=1," +
+      "Outline=1," +
+      "Shadow=0," +
+      "Alignment=2," +
+      "MarginV=48";
 
     const subFilter = haveSubtitleFile
       ? `,subtitles=${escPathForFilter(subtitleFile)}:si=${Number(subtitleDelay).toFixed(2)}:force_style='${forceStyle}':fontsdir=/app/fonts`
@@ -199,32 +263,29 @@ app.post("/stitch", async (req, res) => {
       `${filter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}` +
       (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
       `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[v]`,
-            // Mapping
       "-map", "[v]",
       ...(audioPath
         ? [
-            "-map",
-            `${local.length}:a?`,
-            "-filter:a",
-            `aresample=48000,volume=${audioGain}`,
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
+            "-map", `${local.length}:a?`,
+            "-filter:a", `aresample=48000,volume=${audioGain}`,
+            "-c:a", "aac",
+            "-b:a", "192k",
           ]
         : ["-an"]),
       "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
       "-profile:v", "high", "-level", "4.0",
       "-movflags", "+faststart",
       "-shortest",
-      out
+      out,
     ];
 
     const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
 
     let ffErr = "";
     ff.stderr.on("data", (d) => {
-      const s = d.toString(); ffErr += s; process.stderr.write(`[ffmpeg] ${s}`);
+      const s = d.toString();
+      ffErr += s;
+      process.stderr.write(`[ffmpeg] ${s}`);
     });
 
     ff.on("close", async (code) => {
@@ -249,9 +310,8 @@ app.post("/stitch", async (req, res) => {
         if (audioPath && fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
         if (fs.existsSync(subtitleFile)) fs.unlinkSync(subtitleFile);
         if (fs.existsSync(out)) fs.unlinkSync(out);
-      } catch { }
+      } catch {}
     });
-
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: "stitch_failed", detail: String(err) });
   }
@@ -260,9 +320,7 @@ app.post("/stitch", async (req, res) => {
 // ------------------------------ Server start ---------------------------------
 
 const port = process.env.PORT || 3000;
-const server = app.listen(port, () =>
-  console.log(`Server running on port ${port}`)
-);
+const server = app.listen(port, () => console.log(`Server running on port ${port}`));
 server.requestTimeout = 600000;
 server.headersTimeout = 610000;
 if (typeof server.setTimeout === "function") server.setTimeout(600000);
