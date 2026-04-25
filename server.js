@@ -1,4 +1,4 @@
-// server.js — stitched MP4 mit Crossfade, Untertitel & faststart
+// server.js — stitched MP4 mit Crossfade, Color Grading, Logo/Preis Overlay, Sidechain Compress, Untertitel
 
 import express from "express";
 import { exec as execCb, spawn } from "child_process";
@@ -130,6 +130,14 @@ function escPathForFilter(p) {
   return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 }
 
+// Escape string for FFmpeg drawtext (colon, backslash, single-quote)
+function escDrawtext(s) {
+  return String(s)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/:/g, "\\:");
+}
+
 // --- Dynamic subtitle style builder ----------------------------------------
 
 function buildForceStyle(subtitleStyle = {}) {
@@ -156,6 +164,20 @@ function buildForceStyle(subtitleStyle = {}) {
   ].join(",");
 }
 
+// --- Color grading per shop category ---------------------------------------
+// colorbalance applied before format=yuv420p for best quality
+
+function getColorGradeFilter(kategorie) {
+  const k = (kategorie || "").toLowerCase();
+  if (/spiritual|schmuck|jewel|gold/.test(k))
+    return ",colorbalance=rs=0.1:gs=0.05:bs=-0.1"; // warm golden
+  if (/supplement|fitness|sport|protein/.test(k))
+    return ",colorbalance=rs=-0.05:gs=0.05:bs=0.1"; // cold contrast
+  if (/skincare|beauty|kosmetik|skin|pflege/.test(k))
+    return ",colorbalance=rs=0.05:gs=0.02:bs=-0.05"; // soft pink
+  return ""; // neutral
+}
+
 // ------------------------------- Route --------------------------------------
 
 app.post("/stitch", async (req, res) => {
@@ -173,8 +195,11 @@ app.post("/stitch", async (req, res) => {
       targetDuration = 29,
       fadeOut = 2,
       autoSubtitles = true,
+      shop_kategorie,
+      logo_url,
     } = req.body || {};
 
+    const price = req.body?.price != null ? String(req.body.price) : null;
     const subtitlesText = req.body?.subtitles_text || "";
     const subtitleStyle = req.body?.subtitle_style || {};
     const maxWordsPerLine = Number(subtitleStyle.max_words_per_line || 1);
@@ -201,7 +226,7 @@ app.post("/stitch", async (req, res) => {
       await downloadToFile(audioUrl, audioPath);
     }
 
-    // 3) Background music laden
+    // 3) Background Music laden
     let bgmPath = null;
     if (backgroundMusicUrl) {
       try {
@@ -215,21 +240,50 @@ app.post("/stitch", async (req, res) => {
       }
     }
 
-    // 4) Clip-Längen
+    // 4) Logo laden
+    let logoPath = null;
+    if (logo_url) {
+      try {
+        const logoExt = path.extname(new URL(logo_url).pathname) || ".png";
+        logoPath = path.join(TMP, `logo${logoExt}`);
+        await downloadToFile(logo_url, logoPath);
+        console.log("[logo] downloaded:", logo_url);
+      } catch (e) {
+        console.error("[logo] download failed, skipping:", e.message);
+        logoPath = null;
+      }
+    }
+
+    // 5) Input-Index-Tracking (Reihenfolge: clips → voiceover → bgm → logo)
+    let voIdx = -1, bgmIdx = -1, logoIdx = -1;
+    const ffInputArgs = [...local.flatMap((p) => ["-i", p])];
+    if (audioPath) {
+      voIdx = local.length;
+      ffInputArgs.push("-i", audioPath);
+    }
+    if (bgmPath) {
+      bgmIdx = local.length + (audioPath ? 1 : 0);
+      ffInputArgs.push("-i", bgmPath);
+    }
+    if (logoPath) {
+      logoIdx = local.length + (audioPath ? 1 : 0) + (bgmPath ? 1 : 0);
+      // -loop 1: PNG als statisches Bild endlos wiederholen (wird durch -shortest geschnitten)
+      ffInputArgs.push("-loop", "1", "-i", logoPath);
+    }
+
+    // 6) Clip-Längen bestimmen
     const durations = [];
     for (const p of local) durations.push(await probeDurationSeconds(p));
 
     const d0 = durations[0] ?? 10.0;
     const d1 = durations[1] ?? 10.0;
-
     const clipCount = local.length;
     const sumDur = durations.reduce((a, b) => a + (b || 0), 0);
     const estTotal = Math.max(0, sumDur - (clipCount - 1) * fade);
-
     const padNeeded = Math.max(0, Number(targetDuration) - estTotal);
     const fadeStart = Math.max(0, Number(targetDuration) - Number(fadeOut));
 
-    // 5) Video Filtergraph
+    // 7) Video xfade-Kette → [vout]
     const videoFilter =
       `[0:v]setpts=PTS-STARTPTS[v0];` +
       `[1:v]setpts=PTS-STARTPTS[v1];` +
@@ -241,10 +295,9 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 6) Untertitel generieren
+    // 8) Untertitel generieren
     const SUBDIR = "/tmp/subs";
     if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
-
     const subtitleFile = path.join(SUBDIR, "subtitles.srt");
     let haveSubtitleFile = false;
 
@@ -256,7 +309,6 @@ app.post("/stitch", async (req, res) => {
         .replace(/^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,\.]\d{3}.*$/gm, "")
         .replace(/^\s*$/gm, "")
         .trim();
-
       if (cleanedText) {
         const baseForTiming = audioPath || local[0];
         const wordSrt = await buildWordSRTFromText(cleanedText, baseForTiming, subOpts);
@@ -278,48 +330,75 @@ app.post("/stitch", async (req, res) => {
       }
     }
 
-    // 7) Subtitle forceStyle (dynamic)
+    // 9) Subtitle forceStyle + Color Grade
     const forceStyle = buildForceStyle(subtitleStyle);
     const subFilter = haveSubtitleFile
       ? `,subtitles=${escPathForFilter(subtitleFile)}:si=${Number(subtitleDelay).toFixed(2)}:force_style='${forceStyle}':fontsdir=/app/fonts`
       : "";
+    // colorbalance VOR format=yuv420p für beste Qualität
+    const colorGrade = getColorGradeFilter(shop_kategorie);
 
-    // 8) Audio filter (duck: bgm bei backgroundMusicGain, voiceover bei audioGain, amix)
-    const voIdx = local.length;
-    const bgmAudioIdx = local.length + (audioPath ? 1 : 0);
+    // 10) Video-Post-Process: scale → colorgrade → format → subs → tpad → fade
+    //     Wenn Overlay folgt: Zwischenlabel [vbase], sonst direkt [v]
+    const needsOverlay = !!(logoPath || price);
+    const stage2Label = needsOverlay ? "vbase" : "v";
 
+    const videoPostProcess =
+      `[vout]scale=1080:-2,fps=30${colorGrade},format=yuv420p${subFilter}` +
+      (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
+      `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[${stage2Label}]`;
+
+    // 11) Overlay-Kette (Logo oben rechts + Preis unten links)
+    let overlayChain = "";
+    if (needsOverlay) {
+      let cur = stage2Label;
+
+      if (logoPath) {
+        const next = price ? "vwithlogo" : "v";
+        overlayChain +=
+          `;[${logoIdx}:v]scale=150:-1[logo]` +
+          `;[${cur}][logo]overlay=W-w-20:20:format=auto[${next}]`;
+        cur = next;
+      }
+
+      if (price) {
+        const escaped = escDrawtext(price);
+        overlayChain +=
+          `;[${cur}]drawtext=fontfile=/app/fonts/Montserrat-Bold.ttf` +
+          `:text='${escaped}'` +
+          `:fontcolor=white:fontsize=52` +
+          `:x=30:y=H-th-30` +
+          `:box=1:boxcolor=black@0.6:boxborderw=10[v]`;
+      }
+    }
+
+    // 12) Audio-Filter — Sidechain Compress wenn VO + BGM, sonst einfaches Volume
     let audioFilterStr = "";
     let audioMapTarget = "";
 
     if (audioPath && bgmPath) {
+      // Voiceover als Sidechain-Signal: drückt BGM dynamisch runter wenn Stimme aktiv
       audioFilterStr =
-        `;[${bgmAudioIdx}:a]volume=${Number(backgroundMusicGain).toFixed(4)}[bgm]` +
-        `;[${voIdx}:a]volume=${Number(audioGain).toFixed(4)}[vo]` +
-        `;[bgm][vo]amix=inputs=2:duration=longest:dropout_transition=2[aout]`;
+        `;[${voIdx}:a]asplit=2[vo_raw][vo_sc]` +
+        `;[vo_raw]volume=${Number(audioGain).toFixed(4)}[vo_mix]` +
+        `;[${bgmIdx}:a]volume=${Number(backgroundMusicGain).toFixed(4)}[bgm_base]` +
+        `;[bgm_base][vo_sc]sidechaincompress=threshold=0.02:ratio=6:attack=10:release=250:level_sc=0.9[bgm_duck]` +
+        `;[bgm_duck][vo_mix]amix=inputs=2:duration=longest:dropout_transition=2[aout]`;
       audioMapTarget = "[aout]";
     } else if (audioPath) {
       audioFilterStr = `;[${voIdx}:a]aresample=48000,volume=${Number(audioGain).toFixed(4)}[aout]`;
       audioMapTarget = "[aout]";
     } else if (bgmPath) {
-      audioFilterStr = `;[${bgmAudioIdx}:a]volume=${Number(backgroundMusicGain).toFixed(4)}[aout]`;
+      audioFilterStr = `;[${bgmIdx}:a]volume=${Number(backgroundMusicGain).toFixed(4)}[aout]`;
       audioMapTarget = "[aout]";
     }
 
-    // 9) Full filter_complex
-    const fullFilter =
-      `${videoFilter};[vout]scale=1080:-2,fps=30,format=yuv420p${subFilter}` +
-      (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
-      `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[v]` +
-      audioFilterStr;
-
-    // 10) FFmpeg input args
-    const inputArgs = [...local.flatMap((p) => ["-i", p])];
-    if (audioPath) inputArgs.push("-i", audioPath);
-    if (bgmPath) inputArgs.push("-i", bgmPath);
+    // 13) Kompletter filter_complex
+    const fullFilter = `${videoFilter};${videoPostProcess}${overlayChain}${audioFilterStr}`;
 
     const args = [
       "-y", "-nostdin", "-loglevel", "error",
-      ...inputArgs,
+      ...ffInputArgs,
       "-filter_complex", fullFilter,
       "-map", "[v]",
       ...(audioMapTarget ? ["-map", audioMapTarget, "-c:a", "aac", "-b:a", "192k"] : ["-an"]),
@@ -360,6 +439,7 @@ app.post("/stitch", async (req, res) => {
         for (const p of local) if (fs.existsSync(p)) fs.unlinkSync(p);
         if (audioPath && fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
         if (bgmPath && fs.existsSync(bgmPath)) fs.unlinkSync(bgmPath);
+        if (logoPath && fs.existsSync(logoPath)) fs.unlinkSync(logoPath);
         if (fs.existsSync(subtitleFile)) fs.unlinkSync(subtitleFile);
         if (fs.existsSync(out)) fs.unlinkSync(out);
       } catch {}
