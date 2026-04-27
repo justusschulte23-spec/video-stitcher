@@ -306,7 +306,7 @@ app.post("/stitch", async (req, res) => {
         .replace(/^﻿/, "")
         .replace(/\r\n/g, "\n")
         .replace(/^\d+\s*$/gm, "")
-        .replace(/^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,\.]\d{3}.*$/gm, "")
+        .replace(/^\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}.*$/gm, "")
         .replace(/^\s*$/gm, "")
         .trim();
       if (cleanedText) {
@@ -404,6 +404,7 @@ app.post("/stitch", async (req, res) => {
       ...(audioMapTarget ? ["-map", audioMapTarget, "-c:a", "aac", "-b:a", "192k"] : ["-an"]),
       "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
       "-profile:v", "high", "-level", "4.0",
+      "-pix_fmt", "yuv420p",
       "-movflags", "+faststart",
       "-shortest",
       out,
