@@ -24,6 +24,19 @@ async function downloadToFile(url, outPath) {
   fs.writeFileSync(outPath, buf);
 }
 
+// Non-fatal download: returns destPath on success, null on failure
+async function tryDownloadOptional(url, destPath, label) {
+  if (!url) return null;
+  try {
+    await downloadToFile(url, destPath);
+    console.log(`[${label}] downloaded`);
+    return destPath;
+  } catch (e) {
+    console.error(`[${label}] download failed, skipping:`, e.message);
+    return null;
+  }
+}
+
 async function probeDurationSeconds(filePath) {
   const cmd = `ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=nk=1:nw=1 "${filePath}"`;
   const { stdout } = await execp(cmd, { maxBuffer: 8 * 1024 * 1024 });
@@ -130,7 +143,6 @@ function escPathForFilter(p) {
   return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 }
 
-// Escape string for FFmpeg drawtext (colon, backslash, single-quote)
 function escDrawtext(s) {
   return String(s)
     .replace(/\\/g, "\\\\")
@@ -209,49 +221,38 @@ app.post("/stitch", async (req, res) => {
       return res.status(400).json({ error: "Provide clips: [url1,url2,url3]" });
     }
 
-    // 1) Videos laden
-    const local = [];
-    for (let i = 0; i < Math.min(3, clips.length); i++) {
-      const p = path.join(TMP, `clip_${i}.mp4`);
-      await downloadToFile(clips[i], p);
-      local.push(p);
-    }
+    // 1-4) Alle Assets parallel downloaden (clips + audio + bgm + logo gleichzeitig)
+    const clipCount_dl = Math.min(3, clips.length);
+    const clipPaths = Array.from({ length: clipCount_dl }, (_, i) => path.join(TMP, `clip_${i}.mp4`));
+    const audioCand = audioUrl
+      ? path.join(TMP, `voiceover${path.extname(new URL(audioUrl).pathname) || ".mp3"}`)
+      : null;
+    const bgmCand = backgroundMusicUrl
+      ? path.join(TMP, `bgm${path.extname(new URL(backgroundMusicUrl).pathname) || ".mp3"}`)
+      : null;
+    const logoCand = logo_url
+      ? path.join(TMP, `logo${path.extname(new URL(logo_url).pathname) || ".png"}`)
+      : null;
 
-    // 2) Voiceover laden
-    let audioPath = null;
-    if (audioUrl) {
-      const ext = path.extname(new URL(audioUrl).pathname) || ".mp3";
-      audioPath = path.join(TMP, `voiceover${ext}`);
-      await downloadToFile(audioUrl, audioPath);
-    }
+    console.log(`[download] fetching ${clipCount_dl} clip(s) + audio/bgm/logo in parallel...`);
+    const dlStart = Date.now();
 
-    // 3) Background Music laden
-    let bgmPath = null;
-    if (backgroundMusicUrl) {
-      try {
-        const bgmExt = path.extname(new URL(backgroundMusicUrl).pathname) || ".mp3";
-        bgmPath = path.join(TMP, `bgm${bgmExt}`);
-        await downloadToFile(backgroundMusicUrl, bgmPath);
-        console.log("[bgm] downloaded:", backgroundMusicUrl);
-      } catch (e) {
-        console.error("[bgm] download failed, skipping:", e.message);
-        bgmPath = null;
-      }
-    }
+    const [local, audioPath, bgmPath, logoPath] = await Promise.all([
+      // Clips — must all succeed
+      Promise.all(
+        clips.slice(0, 3).map((url, i) => downloadToFile(url, clipPaths[i]).then(() => clipPaths[i]))
+      ),
+      // Voiceover — must succeed if provided
+      audioUrl
+        ? downloadToFile(audioUrl, audioCand).then(() => audioCand)
+        : Promise.resolve(null),
+      // BGM — non-fatal
+      tryDownloadOptional(backgroundMusicUrl, bgmCand, "bgm"),
+      // Logo — non-fatal
+      tryDownloadOptional(logo_url, logoCand, "logo"),
+    ]);
 
-    // 4) Logo laden
-    let logoPath = null;
-    if (logo_url) {
-      try {
-        const logoExt = path.extname(new URL(logo_url).pathname) || ".png";
-        logoPath = path.join(TMP, `logo${logoExt}`);
-        await downloadToFile(logo_url, logoPath);
-        console.log("[logo] downloaded:", logo_url);
-      } catch (e) {
-        console.error("[logo] download failed, skipping:", e.message);
-        logoPath = null;
-      }
-    }
+    console.log(`[download] all assets ready in ${((Date.now() - dlStart) / 1000).toFixed(1)}s`);
 
     // 5) Input-Index-Tracking (Reihenfolge: clips → voiceover → bgm → logo)
     let voIdx = -1, bgmIdx = -1, logoIdx = -1;
@@ -269,9 +270,8 @@ app.post("/stitch", async (req, res) => {
       ffInputArgs.push("-loop", "1", "-i", logoPath);
     }
 
-    // 6) Clip-Längen bestimmen
-    const durations = [];
-    for (const p of local) durations.push(await probeDurationSeconds(p));
+    // 6) Clip-Längen bestimmen (parallel)
+    const durations = await Promise.all(local.map(probeDurationSeconds));
 
     const d0 = durations[0] ?? 10.0;
     const d1 = durations[1] ?? 10.0;
@@ -336,8 +336,8 @@ app.post("/stitch", async (req, res) => {
     const colorGrade = getColorGradeFilter(shop_kategorie);
 
     // 10) Video-Post-Process: scale → colorgrade → subs → tpad → fade
-    //     format=yuv420p deliberately moved to END of chain (step 13) so
-    //     subtitles/overlay cannot re-introduce 4:4:4 before the encoder.
+    //     format=yuv420p is at END of chain (step 13) so subs/overlay
+    //     cannot re-introduce 4:4:4 before the encoder.
     const needsOverlay = !!(logoPath || price);
     const stage2Label = needsOverlay ? "vbase" : "vpre";
 
@@ -346,8 +346,7 @@ app.post("/stitch", async (req, res) => {
       (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
       `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[${stage2Label}]`;
 
-    // 11) Overlay-Kette (Logo oben rechts + Preis unten links)
-    //     Final output label is always [vpre] — format=yuv420p added after.
+    // 11) Overlay-Kette — final label always [vpre]
     let overlayChain = "";
     if (needsOverlay) {
       let cur = stage2Label;
@@ -371,7 +370,7 @@ app.post("/stitch", async (req, res) => {
       }
     }
 
-    // 12) Audio-Filter — Sidechain Compress wenn VO + BGM, sonst einfaches Volume
+    // 12) Audio-Filter — Sidechain Compress wenn VO + BGM
     let audioFilterStr = "";
     let audioMapTarget = "";
 
@@ -391,9 +390,7 @@ app.post("/stitch", async (req, res) => {
       audioMapTarget = "[aout]";
     }
 
-    // 13) Kompletter filter_complex
-    //     [vpre]format=yuv420p[v] is the final video step — guarantees 4:2:0
-    //     into the encoder regardless of what subs/overlay emitted.
+    // 13) Kompletter filter_complex — [vpre]format=yuv420p[v] garantiert 4:2:0 in den Encoder
     const fullFilter =
       `${videoFilter};${videoPostProcess}${overlayChain}` +
       `;[vpre]format=yuv420p[v]` +
