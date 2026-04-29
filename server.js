@@ -1,4 +1,4 @@
-// server.js — stitched MP4 mit Crossfade, Color Grading, Logo/Preis Overlay, Sidechain Compress, Untertitel
+// server.js — stitched MP4 mit Crossfade, Color Grading, Sidechain Compress, Untertitel
 
 import express from "express";
 import { exec as execCb, spawn } from "child_process";
@@ -42,6 +42,17 @@ async function probeDurationSeconds(filePath) {
   const { stdout } = await execp(cmd, { maxBuffer: 8 * 1024 * 1024 });
   const s = parseFloat((stdout || "").trim());
   return Number.isFinite(s) && s > 0 ? s : 10.0;
+}
+
+// Read available system RAM from /proc/meminfo (Linux only)
+function getAvailableMemoryMB() {
+  try {
+    const meminfo = fs.readFileSync("/proc/meminfo", "utf8");
+    const match = meminfo.match(/MemAvailable:\s+(\d+)\s+kB/);
+    return match ? Math.floor(parseInt(match[1], 10) / 1024) : null;
+  } catch {
+    return null;
+  }
 }
 
 // --- Whisper API transcription -------------------------------------------
@@ -194,6 +205,17 @@ function getColorGradeFilter(kategorie) {
 app.post("/stitch", async (req, res) => {
   res.setTimeout(600000);
 
+  // Memory guard — abort early if RAM is critically low
+  const availMB = getAvailableMemoryMB();
+  console.log(`[memory] available: ${availMB ?? "unknown"}MB`);
+  if (availMB !== null && availMB < 200) {
+    return res.status(503).json({
+      error: "insufficient_memory",
+      available_mb: availMB,
+      message: "Server RAM too low — retry in a moment",
+    });
+  }
+
   try {
     const clips = req.body?.clips;
     const fade = Number(req.body?.fade ?? 0.5);
@@ -207,10 +229,9 @@ app.post("/stitch", async (req, res) => {
       fadeOut = 2,
       autoSubtitles = true,
       shop_kategorie,
-      logo_url,
+      // logo_url and price accepted in payload but overlays disabled (memory fix)
     } = req.body || {};
 
-    const price = req.body?.price != null ? String(req.body.price) : null;
     const subtitlesText = req.body?.subtitles_text || "";
     const subtitleStyle = req.body?.subtitle_style || {};
     const maxWordsPerLine = Number(subtitleStyle.max_words_per_line || 1);
@@ -221,7 +242,8 @@ app.post("/stitch", async (req, res) => {
       return res.status(400).json({ error: "Provide clips: [url1,url2,url3]" });
     }
 
-    // 1-4) Alle Assets parallel downloaden (clips + audio + bgm + logo gleichzeitig)
+    // 1-3) Alle Assets parallel downloaden (clips + audio + bgm)
+    //      Logo overlay disabled temporarily to reduce memory pressure
     const clipCount_dl = Math.min(3, clips.length);
     const clipPaths = Array.from({ length: clipCount_dl }, (_, i) => path.join(TMP, `clip_${i}.mp4`));
     const audioCand = audioUrl
@@ -230,32 +252,24 @@ app.post("/stitch", async (req, res) => {
     const bgmCand = backgroundMusicUrl
       ? path.join(TMP, `bgm${path.extname(new URL(backgroundMusicUrl).pathname) || ".mp3"}`)
       : null;
-    const logoCand = logo_url
-      ? path.join(TMP, `logo${path.extname(new URL(logo_url).pathname) || ".png"}`)
-      : null;
 
-    console.log(`[download] fetching ${clipCount_dl} clip(s) + audio/bgm/logo in parallel...`);
+    console.log(`[download] fetching ${clipCount_dl} clip(s) + audio/bgm in parallel...`);
     const dlStart = Date.now();
 
-    const [local, audioPath, bgmPath, logoPath] = await Promise.all([
-      // Clips — must all succeed
+    const [local, audioPath, bgmPath] = await Promise.all([
       Promise.all(
         clips.slice(0, 3).map((url, i) => downloadToFile(url, clipPaths[i]).then(() => clipPaths[i]))
       ),
-      // Voiceover — must succeed if provided
       audioUrl
         ? downloadToFile(audioUrl, audioCand).then(() => audioCand)
         : Promise.resolve(null),
-      // BGM — non-fatal
       tryDownloadOptional(backgroundMusicUrl, bgmCand, "bgm"),
-      // Logo — non-fatal
-      tryDownloadOptional(logo_url, logoCand, "logo"),
     ]);
 
     console.log(`[download] all assets ready in ${((Date.now() - dlStart) / 1000).toFixed(1)}s`);
 
-    // 5) Input-Index-Tracking (Reihenfolge: clips → voiceover → bgm → logo)
-    let voIdx = -1, bgmIdx = -1, logoIdx = -1;
+    // 4) Input-Index-Tracking (clips → voiceover → bgm)
+    let voIdx = -1, bgmIdx = -1;
     const ffInputArgs = [...local.flatMap((p) => ["-i", p])];
     if (audioPath) {
       voIdx = local.length;
@@ -265,12 +279,8 @@ app.post("/stitch", async (req, res) => {
       bgmIdx = local.length + (audioPath ? 1 : 0);
       ffInputArgs.push("-i", bgmPath);
     }
-    if (logoPath) {
-      logoIdx = local.length + (audioPath ? 1 : 0) + (bgmPath ? 1 : 0);
-      ffInputArgs.push("-loop", "1", "-i", logoPath);
-    }
 
-    // 6) Clip-Längen bestimmen (parallel)
+    // 5) Clip-Längen bestimmen (parallel)
     const durations = await Promise.all(local.map(probeDurationSeconds));
 
     const d0 = durations[0] ?? 10.0;
@@ -281,7 +291,7 @@ app.post("/stitch", async (req, res) => {
     const padNeeded = Math.max(0, Number(targetDuration) - estTotal);
     const fadeStart = Math.max(0, Number(targetDuration) - Number(fadeOut));
 
-    // 7) Video xfade-Kette → [vout]
+    // 6) Video xfade-Kette → [vout]
     const videoFilter =
       `[0:v]setpts=PTS-STARTPTS[v0];` +
       `[1:v]setpts=PTS-STARTPTS[v1];` +
@@ -293,7 +303,7 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 8) Untertitel generieren
+    // 7) Untertitel generieren
     const SUBDIR = "/tmp/subs";
     if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
     const subtitleFile = path.join(SUBDIR, "subtitles.srt");
@@ -328,49 +338,22 @@ app.post("/stitch", async (req, res) => {
       }
     }
 
-    // 9) Subtitle forceStyle + Color Grade
+    // 8) Subtitle forceStyle + Color Grade
     const forceStyle = buildForceStyle(subtitleStyle);
     const subFilter = haveSubtitleFile
       ? `,subtitles=${escPathForFilter(subtitleFile)}:si=${Number(subtitleDelay).toFixed(2)}:force_style='${forceStyle}':fontsdir=/app/fonts`
       : "";
     const colorGrade = getColorGradeFilter(shop_kategorie);
 
-    // 10) Video-Post-Process: scale → colorgrade → subs → tpad → fade
-    //     format=yuv420p is at END of chain (step 13) so subs/overlay
-    //     cannot re-introduce 4:4:4 before the encoder.
-    const needsOverlay = !!(logoPath || price);
-    const stage2Label = needsOverlay ? "vbase" : "vpre";
-
+    // 9) Video-Post-Process: scale to 720p → colorgrade → subs → tpad → fade → [vpre]
+    //    scale=-2:720 keeps aspect ratio, limits height to 720px (~400MB RAM vs ~1.8GB at 4K)
+    //    format=yuv420p at END (step 11) so subs cannot re-introduce 4:4:4
     const videoPostProcess =
-      `[vout]scale=1080:-2,fps=30${colorGrade}${subFilter}` +
+      `[vout]scale=-2:720${colorGrade}${subFilter}` +
       (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
-      `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[${stage2Label}]`;
+      `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[vpre]`;
 
-    // 11) Overlay-Kette — final label always [vpre]
-    let overlayChain = "";
-    if (needsOverlay) {
-      let cur = stage2Label;
-
-      if (logoPath) {
-        const next = price ? "vwithlogo" : "vpre";
-        overlayChain +=
-          `;[${logoIdx}:v]scale=150:-1[logo]` +
-          `;[${cur}][logo]overlay=W-w-20:20:format=auto[${next}]`;
-        cur = next;
-      }
-
-      if (price) {
-        const escaped = escDrawtext(price);
-        overlayChain +=
-          `;[${cur}]drawtext=fontfile=/app/fonts/Montserrat-Bold.ttf` +
-          `:text='${escaped}'` +
-          `:fontcolor=white:fontsize=52` +
-          `:x=30:y=H-th-30` +
-          `:box=1:boxcolor=black@0.6:boxborderw=10[vpre]`;
-      }
-    }
-
-    // 12) Audio-Filter — Sidechain Compress wenn VO + BGM
+    // 10) Audio-Filter — Sidechain Compress wenn VO + BGM
     let audioFilterStr = "";
     let audioMapTarget = "";
 
@@ -390,9 +373,9 @@ app.post("/stitch", async (req, res) => {
       audioMapTarget = "[aout]";
     }
 
-    // 13) Kompletter filter_complex — [vpre]format=yuv420p[v] garantiert 4:2:0 in den Encoder
+    // 11) Kompletter filter_complex — [vpre]format=yuv420p[v] als letzter Schritt
     const fullFilter =
-      `${videoFilter};${videoPostProcess}${overlayChain}` +
+      `${videoFilter};${videoPostProcess}` +
       `;[vpre]format=yuv420p[v]` +
       `${audioFilterStr}`;
 
@@ -402,7 +385,7 @@ app.post("/stitch", async (req, res) => {
       "-filter_complex", fullFilter,
       "-map", "[v]",
       ...(audioMapTarget ? ["-map", audioMapTarget, "-c:a", "aac", "-b:a", "192k"] : ["-an"]),
-      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
       "-profile:v", "high", "-level", "4.0",
       "-pix_fmt", "yuv420p",
       "-movflags", "+faststart",
@@ -440,7 +423,6 @@ app.post("/stitch", async (req, res) => {
         for (const p of local) if (fs.existsSync(p)) fs.unlinkSync(p);
         if (audioPath && fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
         if (bgmPath && fs.existsSync(bgmPath)) fs.unlinkSync(bgmPath);
-        if (logoPath && fs.existsSync(logoPath)) fs.unlinkSync(logoPath);
         if (fs.existsSync(subtitleFile)) fs.unlinkSync(subtitleFile);
         if (fs.existsSync(out)) fs.unlinkSync(out);
       } catch {}
