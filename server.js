@@ -165,17 +165,16 @@ function buildForceStyle(subtitleStyle = {}) {
 }
 
 // --- Color grading per shop category ---------------------------------------
-// colorbalance applied before format=yuv420p for best quality
 
 function getColorGradeFilter(kategorie) {
   const k = (kategorie || "").toLowerCase();
   if (/spiritual|schmuck|jewel|gold/.test(k))
-    return ",colorbalance=rs=0.1:gs=0.05:bs=-0.1"; // warm golden
+    return ",colorbalance=rs=0.1:gs=0.05:bs=-0.1";
   if (/supplement|fitness|sport|protein/.test(k))
-    return ",colorbalance=rs=-0.05:gs=0.05:bs=0.1"; // cold contrast
+    return ",colorbalance=rs=-0.05:gs=0.05:bs=0.1";
   if (/skincare|beauty|kosmetik|skin|pflege/.test(k))
-    return ",colorbalance=rs=0.05:gs=0.02:bs=-0.05"; // soft pink
-  return ""; // neutral
+    return ",colorbalance=rs=0.05:gs=0.02:bs=-0.05";
+  return "";
 }
 
 // ------------------------------- Route --------------------------------------
@@ -267,7 +266,6 @@ app.post("/stitch", async (req, res) => {
     }
     if (logoPath) {
       logoIdx = local.length + (audioPath ? 1 : 0) + (bgmPath ? 1 : 0);
-      // -loop 1: PNG als statisches Bild endlos wiederholen (wird durch -shortest geschnitten)
       ffInputArgs.push("-loop", "1", "-i", logoPath);
     }
 
@@ -335,26 +333,27 @@ app.post("/stitch", async (req, res) => {
     const subFilter = haveSubtitleFile
       ? `,subtitles=${escPathForFilter(subtitleFile)}:si=${Number(subtitleDelay).toFixed(2)}:force_style='${forceStyle}':fontsdir=/app/fonts`
       : "";
-    // colorbalance VOR format=yuv420p für beste Qualität
     const colorGrade = getColorGradeFilter(shop_kategorie);
 
-    // 10) Video-Post-Process: scale → colorgrade → format → subs → tpad → fade
-    //     Wenn Overlay folgt: Zwischenlabel [vbase], sonst direkt [v]
+    // 10) Video-Post-Process: scale → colorgrade → subs → tpad → fade
+    //     format=yuv420p deliberately moved to END of chain (step 13) so
+    //     subtitles/overlay cannot re-introduce 4:4:4 before the encoder.
     const needsOverlay = !!(logoPath || price);
-    const stage2Label = needsOverlay ? "vbase" : "v";
+    const stage2Label = needsOverlay ? "vbase" : "vpre";
 
     const videoPostProcess =
-      `[vout]scale=1080:-2,fps=30${colorGrade},format=yuv420p${subFilter}` +
+      `[vout]scale=1080:-2,fps=30${colorGrade}${subFilter}` +
       (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
       `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[${stage2Label}]`;
 
     // 11) Overlay-Kette (Logo oben rechts + Preis unten links)
+    //     Final output label is always [vpre] — format=yuv420p added after.
     let overlayChain = "";
     if (needsOverlay) {
       let cur = stage2Label;
 
       if (logoPath) {
-        const next = price ? "vwithlogo" : "v";
+        const next = price ? "vwithlogo" : "vpre";
         overlayChain +=
           `;[${logoIdx}:v]scale=150:-1[logo]` +
           `;[${cur}][logo]overlay=W-w-20:20:format=auto[${next}]`;
@@ -368,7 +367,7 @@ app.post("/stitch", async (req, res) => {
           `:text='${escaped}'` +
           `:fontcolor=white:fontsize=52` +
           `:x=30:y=H-th-30` +
-          `:box=1:boxcolor=black@0.6:boxborderw=10[v]`;
+          `:box=1:boxcolor=black@0.6:boxborderw=10[vpre]`;
       }
     }
 
@@ -377,7 +376,6 @@ app.post("/stitch", async (req, res) => {
     let audioMapTarget = "";
 
     if (audioPath && bgmPath) {
-      // Voiceover als Sidechain-Signal: drückt BGM dynamisch runter wenn Stimme aktiv
       audioFilterStr =
         `;[${voIdx}:a]asplit=2[vo_raw][vo_sc]` +
         `;[vo_raw]volume=${Number(audioGain).toFixed(4)}[vo_mix]` +
@@ -394,7 +392,12 @@ app.post("/stitch", async (req, res) => {
     }
 
     // 13) Kompletter filter_complex
-    const fullFilter = `${videoFilter};${videoPostProcess}${overlayChain}${audioFilterStr}`;
+    //     [vpre]format=yuv420p[v] is the final video step — guarantees 4:2:0
+    //     into the encoder regardless of what subs/overlay emitted.
+    const fullFilter =
+      `${videoFilter};${videoPostProcess}${overlayChain}` +
+      `;[vpre]format=yuv420p[v]` +
+      `${audioFilterStr}`;
 
     const args = [
       "-y", "-nostdin", "-loglevel", "error",
