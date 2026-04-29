@@ -94,60 +94,168 @@ async function transcribeWithWhisper(audioPath) {
   return data.words || [];
 }
 
-// --- SRT builder with max-words grouping + hook single-word ----------------
+// --- Font management -------------------------------------------------------
 
-function buildSRTFromWords(words, { maxWordsPerLine = 1, hookSingleWord = false, hookDuration = 2.5 } = {}) {
-  if (!words.length) return "1\n00:00:00,000 --> 00:00:00,600\n \n";
+const FONTS_DIR = "/tmp/fonts";
 
-  const pad = (n) => String(n).padStart(2, "0");
-  const toTC = (sec) => {
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = Math.floor(sec % 60);
-    const ms = Math.round((sec - Math.floor(sec)) * 1000);
-    return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms).padStart(3, "0")}`;
-  };
+// jsDelivr fontsource mirrors — stable TTF endpoints
+const FONT_URLS = {
+  cinzel:          "https://cdn.jsdelivr.net/fontsource/fonts/cinzel@latest/latin-400-normal.ttf",
+  montserrat_bold: "https://cdn.jsdelivr.net/fontsource/fonts/montserrat@latest/latin-700-normal.ttf",
+};
 
-  const chunks = [];
-  let i = 0;
-  while (i < words.length) {
-    const isHook = hookSingleWord && words[i].start < hookDuration;
-    const size = isHook ? 1 : Math.max(1, maxWordsPerLine);
-    const slice = words.slice(i, i + size);
-    const text = slice.map((w) => (w.word || "").trim()).join(" ").trim();
-    if (text) chunks.push({ text, start: slice[0].start, end: slice[slice.length - 1].end });
-    i += size;
+let cinzelPath = null;
+let montserratBoldPath = null;
+
+async function ensureFonts() {
+  if (!fs.existsSync(FONTS_DIR)) fs.mkdirSync(FONTS_DIR, { recursive: true });
+
+  async function downloadFont(url, filename) {
+    const dest = path.join(FONTS_DIR, filename);
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 10_000) return dest;
+    try {
+      await downloadToFile(url, dest);
+      console.log(`[fonts] downloaded ${filename} (${fs.statSync(dest).size} bytes)`);
+      return dest;
+    } catch (e) {
+      console.error(`[fonts] failed to download ${filename}:`, e.message);
+      return null;
+    }
   }
 
-  let srt = "";
-  chunks.forEach((c, idx) => {
-    srt += `${idx + 1}\n${toTC(c.start)} --> ${toTC(c.end)}\n${c.text}\n\n`;
-  });
-  return srt || "1\n00:00:00,000 --> 00:00:00,600\n \n";
+  [cinzelPath, montserratBoldPath] = await Promise.all([
+    downloadFont(FONT_URLS.cinzel, "Cinzel-Regular.ttf"),
+    downloadFont(FONT_URLS.montserrat_bold, "Montserrat-Bold.ttf"),
+  ]);
+
+  console.log(`[fonts] Cinzel: ${cinzelPath}, Montserrat-Bold: ${montserratBoldPath}`);
 }
 
-// --- Manual word-distribution SRT (fallback when no Whisper) ----------------
+function getFontForKategorie(kategorie) {
+  const k = (kategorie || "").toLowerCase();
+  const isLuxury = /spiritual|schmuck|jewel|gold|luxury|luxus|edelstein|kristall|feng|chakra|meditation|yoga/.test(k);
+  return {
+    name: isLuxury ? "Cinzel" : "Montserrat",
+    isLuxury,
+  };
+}
 
-async function buildWordSRTFromText(text, timingFile, { maxWordsPerLine = 1, hookSingleWord = false, hookDuration = 2.5 } = {}) {
+// --- ASS subtitle builder (word-by-word via Whisper timestamps) -------------
+
+// CTA + price words → Champagne Gold
+const CTA_WORDS = new Set([
+  "jetzt","now","kaufen","buy","bestellen","order","gratis","free","neu","new",
+  "heute","today","sichern","save","holen","get","testen","try","entdecken",
+  "discover","klick","click","link","bio","swipe","shop","code","deal","exklusiv",
+]);
+
+function isGoldWord(raw) {
+  const w = raw.toLowerCase().replace(/[^\w€$%]/g, "");
+  if (CTA_WORDS.has(w)) return true;
+  // price / number pattern: €39, $49, 50%, 29.99€
+  if (/^[€$]?\d+([.,]\d+)?[€$%]?$/.test(w)) return true;
+  return false;
+}
+
+function toASSTime(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const cs = Math.round((sec - Math.floor(sec)) * 100);
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
+}
+
+function buildASSFromWords(words, { isLuxury = false, fontName = "Montserrat", keyWords = [] } = {}) {
+  const goldSet = new Set((keyWords || []).map((w) => w.toLowerCase()));
+
+  // ASS color format: &HAABBGGRR  (AA=alpha, 00=opaque)
+  // RGB 0xE8D5A3 → BGR A3D5E8
+  const luxuryPrimary = "&H00A3D5E8";
+  // RGB 0xC9A84C → BGR 4CA8C9
+  const luxuryShadow  = "&H004CA8C9";
+  const cleanPrimary  = "&H00FFFFFF";
+  // black 30% alpha: 0x4D ≈ 77 ≈ 30% of 255
+  const cleanBorder   = "&H4D000000";
+  // Champagne Gold RGB 0xD4AF37 → BGR 37AFD4
+  const goldPrimary   = "&H0037AFD4";
+
+  const pc      = isLuxury ? luxuryPrimary : cleanPrimary;
+  const oc      = isLuxury ? luxuryShadow  : cleanBorder;
+  const bold    = isLuxury ? 0 : 1;
+  const outline = isLuxury ? 2 : 1;
+
+  // Hook = first 3 words of the whole audio → 72px, rest → 58px
+  const header = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 1
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Hook,${fontName},72,${pc},&H000000FF,${oc},&H00000000,${bold},0,0,0,0,100,100,0,0,1,${outline},0,2,10,10,80,1
+Style: Normal,${fontName},58,${pc},&H000000FF,${oc},&H00000000,${bold},0,0,0,0,100,100,0,0,1,${outline},0,2,10,10,80,1
+Style: Gold,${fontName},58,${goldPrimary},&H000000FF,${oc},&H00000000,${bold},0,0,0,0,100,100,0,0,1,${outline},0,2,10,10,80,1
+Style: GoldHook,${fontName},72,${goldPrimary},&H000000FF,${oc},&H00000000,${bold},0,0,0,0,100,100,0,0,1,${outline},0,2,10,10,80,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+  if (!words.length) return header;
+
+  const lines = [];
+  words.forEach((w, idx) => {
+    const text = (w.word || "").replace(/[{}]/g, "").trim();
+    if (!text) return;
+
+    const start    = w.start ?? 0;
+    const end      = w.end   ?? (start + 0.5);
+    // Clip display end to just before next word (clean separation)
+    const nextStart = words[idx + 1]?.start ?? (end + 1.5);
+    const dispEnd  = Math.min(nextStart - 0.02, end + 2.0);
+    const safeEnd  = Math.max(start + 0.15, dispEnd);
+
+    const isHook = idx < 3;
+    const isGold = goldSet.has(text.toLowerCase()) || isGoldWord(text);
+
+    let style;
+    if (isHook && isGold)  style = "GoldHook";
+    else if (isHook)       style = "Hook";
+    else if (isGold)       style = "Gold";
+    else                   style = "Normal";
+
+    // \fad(fadein_ms, fadeout_ms) — 100ms fade-in per word
+    lines.push(
+      `Dialogue: 0,${toASSTime(start)},${toASSTime(safeEnd)},${style},,0,0,0,,{\\fad(100,0)}${text}`
+    );
+  });
+
+  return header + lines.join("\n") + "\n";
+}
+
+// Fallback: distribute words evenly when no Whisper timestamps available
+async function buildWordASSFromText(text, timingFile, fontOpts = {}) {
   const probeCmd = `ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${timingFile}"`;
   const { stdout } = await execp(probeCmd, { maxBuffer: 8 * 1024 * 1024 });
 
   const rawTotal = Math.max(0.1, parseFloat((stdout || "0").trim()) || 0);
-  const total = rawTotal * 1.08;
+  const total    = rawTotal * 1.08;
 
   const allWords = (text || "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
-  if (!allWords.length) return "1\n00:00:00,000 --> 00:00:00,600\n \n";
+  if (!allWords.length) return buildASSFromWords([], fontOpts);
 
   let per = total / allWords.length;
   per = Math.max(0.25, Math.min(1.2, per));
 
   const wordObjs = allWords.map((w, idx) => ({
-    word: w,
+    word:  w,
     start: idx * per,
-    end: Math.min(total, (idx + 1) * per),
+    end:   Math.min(total, (idx + 1) * per),
   }));
 
-  return buildSRTFromWords(wordObjs, { maxWordsPerLine, hookSingleWord, hookDuration });
+  return buildASSFromWords(wordObjs, fontOpts);
 }
 
 function escPathForFilter(p) {
@@ -159,32 +267,6 @@ function escDrawtext(s) {
     .replace(/\\/g, "\\\\")
     .replace(/'/g, "\\'")
     .replace(/:/g, "\\:");
-}
-
-// --- Dynamic subtitle style builder ----------------------------------------
-
-function buildForceStyle(subtitleStyle = {}) {
-  const rawFont = subtitleStyle.font || "Anton";
-  const isBold = /bold/i.test(rawFont);
-  const fontFamily = rawFont.replace(/[-\s]?bold/gi, "").replace(/-/g, " ").trim() || "Anton";
-
-  const color = subtitleStyle.color === "white" ? "&H00FFFFFF" : "&H00FFFFFF";
-  const isGlow = subtitleStyle.effect === "glow";
-  const outlineColor = isGlow ? "&H00000000" : "&H0037AFD4";
-  const outline = isGlow ? 4 : 1;
-
-  return [
-    `Fontname=${fontFamily}`,
-    "Fontsize=36",
-    `PrimaryColour=${color}`,
-    `OutlineColour=${outlineColor}`,
-    "BorderStyle=1",
-    `Outline=${outline}`,
-    "Shadow=0",
-    `Bold=${isBold ? 1 : 0}`,
-    "Alignment=2",
-    "MarginV=48",
-  ].join(",");
 }
 
 // --- Color grading per shop category ---------------------------------------
@@ -224,26 +306,24 @@ app.post("/stitch", async (req, res) => {
       audioGain = 1.0,
       backgroundMusicUrl,
       backgroundMusicGain = 0.25,
-      subtitleDelay = 0.1,
       targetDuration = 29,
       fadeOut = 2,
       autoSubtitles = true,
       shop_kategorie,
-      // logo_url and price accepted in payload but overlays disabled (memory fix)
+      key_words = [],
+      // logo_url and price accepted but overlays disabled (memory fix)
     } = req.body || {};
 
-    const subtitlesText = req.body?.subtitles_text || "";
-    const subtitleStyle = req.body?.subtitle_style || {};
-    const maxWordsPerLine = Number(subtitleStyle.max_words_per_line || 1);
-    const hookSingleWord = Boolean(subtitleStyle.hook_single_word);
-    const subOpts = { maxWordsPerLine, hookSingleWord };
+    const subtitlesText  = req.body?.subtitles_text || "";
 
     if (!Array.isArray(clips) || clips.length < 2) {
       return res.status(400).json({ error: "Provide clips: [url1,url2,url3]" });
     }
 
+    // Font selection based on shop_kategorie
+    const fontInfo = getFontForKategorie(shop_kategorie);
+
     // 1-3) Alle Assets parallel downloaden (clips + audio + bgm)
-    //      Logo overlay disabled temporarily to reduce memory pressure
     const clipCount_dl = Math.min(3, clips.length);
     const clipPaths = Array.from({ length: clipCount_dl }, (_, i) => path.join(TMP, `clip_${i}.mp4`));
     const audioCand = audioUrl
@@ -303,11 +383,13 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 7) Untertitel generieren
+    // 7) Untertitel generieren (ASS-Format, Wort-für-Wort via Whisper)
     const SUBDIR = "/tmp/subs";
     if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
-    const subtitleFile = path.join(SUBDIR, "subtitles.srt");
+    const subtitleFile = path.join(SUBDIR, "subtitles.ass");
     let haveSubtitleFile = false;
+
+    const assOpts = { isLuxury: fontInfo.isLuxury, fontName: fontInfo.name, keyWords: key_words };
 
     if (subtitlesText) {
       const cleanedText = subtitlesText
@@ -319,8 +401,8 @@ app.post("/stitch", async (req, res) => {
         .trim();
       if (cleanedText) {
         const baseForTiming = audioPath || local[0];
-        const wordSrt = await buildWordSRTFromText(cleanedText, baseForTiming, subOpts);
-        fs.writeFileSync(subtitleFile, wordSrt, "utf8");
+        const assContent = await buildWordASSFromText(cleanedText, baseForTiming, assOpts);
+        fs.writeFileSync(subtitleFile, assContent, "utf8");
         await new Promise((r) => setTimeout(r, 150));
         haveSubtitleFile = fs.existsSync(subtitleFile);
       }
@@ -328,26 +410,23 @@ app.post("/stitch", async (req, res) => {
       try {
         console.log("[whisper] transcribing audio...");
         const words = await transcribeWithWhisper(audioPath);
-        const whisperSrt = buildSRTFromWords(words, subOpts);
-        fs.writeFileSync(subtitleFile, whisperSrt, "utf8");
+        const assContent = buildASSFromWords(words, assOpts);
+        fs.writeFileSync(subtitleFile, assContent, "utf8");
         await new Promise((r) => setTimeout(r, 150));
         haveSubtitleFile = fs.existsSync(subtitleFile);
-        console.log("[whisper] subtitle file written");
+        console.log(`[whisper] ${words.length} words → ASS written (font: ${fontInfo.name}, luxury: ${fontInfo.isLuxury})`);
       } catch (e) {
         console.error("[whisper] transcription failed, skipping subtitles:", e.message);
       }
     }
 
-    // 8) Subtitle forceStyle + Color Grade
-    const forceStyle = buildForceStyle(subtitleStyle);
+    // 8) Subtitle filter (ASS — styles embedded, fontsdir points to downloaded fonts)
     const subFilter = haveSubtitleFile
-      ? `,subtitles=${escPathForFilter(subtitleFile)}:si=${Number(subtitleDelay).toFixed(2)}:force_style='${forceStyle}':fontsdir=/app/fonts`
+      ? `,subtitles=${escPathForFilter(subtitleFile)}:fontsdir=${escPathForFilter(FONTS_DIR)}`
       : "";
     const colorGrade = getColorGradeFilter(shop_kategorie);
 
     // 9) Video-Post-Process: scale to 720p → colorgrade → subs → tpad → fade → [vpre]
-    //    scale=-2:720 keeps aspect ratio, limits height to 720px (~400MB RAM vs ~1.8GB at 4K)
-    //    format=yuv420p at END (step 11) so subs cannot re-introduce 4:4:4
     const videoPostProcess =
       `[vout]scale=-2:720${colorGrade}${subFilter}` +
       (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
@@ -439,3 +518,6 @@ const server = app.listen(port, () => console.log(`Server running on port ${port
 server.requestTimeout = 600000;
 server.headersTimeout = 610000;
 if (typeof server.setTimeout === "function") server.setTimeout(600000);
+
+// Download fonts in background — non-blocking, server starts immediately
+ensureFonts().catch((e) => console.error("[fonts] startup download error:", e.message));
