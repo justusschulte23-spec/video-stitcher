@@ -1,12 +1,13 @@
 // server.js — stitched MP4 mit Crossfade, Color Grading, Sidechain Compress, Untertitel
 
 import express from "express";
-import { exec as execCb, spawn } from "child_process";
+import { exec as execCb, execFile, spawn } from "child_process";
 import fs from "fs";
 import { promisify } from "util";
 import path from "path";
 
-const execp = promisify(execCb);
+const execp     = promisify(execCb);
+const execFileP = promisify(execFile);
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -35,6 +36,24 @@ async function tryDownloadOptional(url, destPath, label) {
     console.error(`[${label}] download failed, skipping:`, e.message);
     return null;
   }
+}
+
+async function uploadToCloudinary(filePath, folder, resourceType = "image") {
+  const CLOUD  = process.env.CLOUDINARY_CLOUD_NAME    || "Poweroflillith";
+  const PRESET = process.env.CLOUDINARY_UPLOAD_PRESET || "poweroflillithvid";
+  const { default: FormData } = await import("form-data");
+  const { default: fetch }    = await import("node-fetch");
+  const form = new FormData();
+  form.append("file", fs.createReadStream(filePath));
+  form.append("upload_preset", PRESET);
+  form.append("folder", folder);
+  const resp = await fetch(
+    `https://api.cloudinary.com/v1_1/${CLOUD}/${resourceType}/upload`,
+    { method: "POST", body: form }
+  );
+  const data = await resp.json();
+  if (!data.secure_url) throw new Error("Cloudinary upload failed: " + JSON.stringify(data));
+  return data.secure_url;
 }
 
 async function probeDurationSeconds(filePath) {
@@ -98,7 +117,6 @@ async function transcribeWithWhisper(audioPath) {
 
 const FONTS_DIR = "/tmp/fonts";
 
-// jsDelivr fontsource mirrors — stable TTF endpoints
 const FONT_URLS = {
   cinzel:          "https://cdn.jsdelivr.net/fontsource/fonts/cinzel@latest/latin-400-normal.ttf",
   montserrat_bold: "https://cdn.jsdelivr.net/fontsource/fonts/montserrat@latest/latin-700-normal.ttf",
@@ -142,7 +160,6 @@ function getFontForKategorie(kategorie) {
 
 // --- ASS subtitle builder (word-by-word via Whisper timestamps) -------------
 
-// CTA + price words → Champagne Gold
 const CTA_WORDS = new Set([
   "jetzt","now","kaufen","buy","bestellen","order","gratis","free","neu","new",
   "heute","today","sichern","save","holen","get","testen","try","entdecken",
@@ -152,7 +169,6 @@ const CTA_WORDS = new Set([
 function isGoldWord(raw) {
   const w = raw.toLowerCase().replace(/[^\w€$%]/g, "");
   if (CTA_WORDS.has(w)) return true;
-  // price / number pattern: €39, $49, 50%, 29.99€
   if (/^[€$]?\d+([.,]\d+)?[€$%]?$/.test(w)) return true;
   return false;
 }
@@ -168,15 +184,10 @@ function toASSTime(sec) {
 function buildASSFromWords(words, { isLuxury = false, fontName = "Montserrat", keyWords = [] } = {}) {
   const goldSet = new Set((keyWords || []).map((w) => w.toLowerCase()));
 
-  // ASS color format: &HAABBGGRR  (AA=alpha, 00=opaque)
-  // RGB 0xE8D5A3 → BGR A3D5E8
   const luxuryPrimary = "&H00A3D5E8";
-  // RGB 0xC9A84C → BGR 4CA8C9
   const luxuryShadow  = "&H004CA8C9";
   const cleanPrimary  = "&H00FFFFFF";
-  // black 30% alpha: 0x4D ≈ 77 ≈ 30% of 255
   const cleanBorder   = "&H4D000000";
-  // Champagne Gold RGB 0xD4AF37 → BGR 37AFD4
   const goldPrimary   = "&H0037AFD4";
 
   const pc      = isLuxury ? luxuryPrimary : cleanPrimary;
@@ -184,7 +195,6 @@ function buildASSFromWords(words, { isLuxury = false, fontName = "Montserrat", k
   const bold    = isLuxury ? 0 : 1;
   const outline = isLuxury ? 2 : 1;
 
-  // Hook = first 3 words of the whole audio → 72px, rest → 58px
   const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -212,7 +222,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     const start    = w.start ?? 0;
     const end      = w.end   ?? (start + 0.5);
-    // Clip display end to just before next word (clean separation)
     const nextStart = words[idx + 1]?.start ?? (end + 1.5);
     const dispEnd  = Math.min(nextStart - 0.02, end + 2.0);
     const safeEnd  = Math.max(start + 0.15, dispEnd);
@@ -226,7 +235,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     else if (isGold)       style = "Gold";
     else                   style = "Normal";
 
-    // \fad(fadein_ms, fadeout_ms) — 100ms fade-in per word
     lines.push(
       `Dialogue: 0,${toASSTime(start)},${toASSTime(safeEnd)},${style},,0,0,0,,{\\fad(100,0)}${text}`
     );
@@ -235,7 +243,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   return header + lines.join("\n") + "\n";
 }
 
-// Fallback: distribute words evenly when no Whisper timestamps available
 async function buildWordASSFromText(text, timingFile, fontOpts = {}) {
   const probeCmd = `ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${timingFile}"`;
   const { stdout } = await execp(probeCmd, { maxBuffer: 8 * 1024 * 1024 });
@@ -262,15 +269,6 @@ function escPathForFilter(p) {
   return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 }
 
-function escDrawtext(s) {
-  return String(s)
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/:/g, "\\:");
-}
-
-// --- Color grading per shop category ---------------------------------------
-
 function getColorGradeFilter(kategorie) {
   const k = (kategorie || "").toLowerCase();
   if (/spiritual|schmuck|jewel|gold/.test(k))
@@ -282,12 +280,57 @@ function getColorGradeFilter(kategorie) {
   return "";
 }
 
-// ------------------------------- Route --------------------------------------
+// ------------------------------- /composite ---------------------------------
+
+app.post("/composite", async (req, res) => {
+  const {
+    background_url,
+    product_url,
+    scale    = 0.55,
+    position = "center",
+  } = req.body || {};
+
+  if (!background_url || !product_url)
+    return res.status(400).json({ error: "background_url and product_url required" });
+
+  const jobId      = Date.now().toString();
+  const bgPath     = path.join(TMP, `comp_bg_${jobId}.jpg`);
+  const productPath = path.join(TMP, `comp_prod_${jobId}.png`);
+  const outPath    = path.join(TMP, `comp_out_${jobId}.jpg`);
+
+  try {
+    await Promise.all([
+      downloadToFile(background_url, bgPath),
+      downloadToFile(product_url, productPath),
+    ]);
+
+    const { stdout } = await execFileP(
+      "python3",
+      ["composite.py", bgPath, productPath, outPath, String(scale), position],
+      { timeout: 60000, maxBuffer: 10 * 1024 * 1024 }
+    );
+
+    const parts = stdout.trim().split(",");
+    const w = parseInt(parts[0], 10);
+    const h = parseInt(parts[1], 10);
+
+    const compositedUrl = await uploadToCloudinary(outPath, "composited_frames", "image");
+    res.json({ composited_url: compositedUrl, width: w, height: h });
+  } catch (err) {
+    console.error("[composite] Error:", err.message.slice(0, 300));
+    if (!res.headersSent) res.status(500).json({ error: "composite_failed", detail: String(err) });
+  } finally {
+    for (const p of [bgPath, productPath, outPath]) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  }
+});
+
+// ------------------------------- /stitch ------------------------------------
 
 app.post("/stitch", async (req, res) => {
   res.setTimeout(600000);
 
-  // Memory guard — abort early if RAM is critically low
   const availMB = getAvailableMemoryMB();
   console.log(`[memory] available: ${availMB ?? "unknown"}MB`);
   if (availMB !== null && availMB < 200) {
@@ -311,7 +354,6 @@ app.post("/stitch", async (req, res) => {
       autoSubtitles = true,
       shop_kategorie,
       key_words = [],
-      // logo_url and price accepted but overlays disabled (memory fix)
     } = req.body || {};
 
     const subtitlesText  = req.body?.subtitles_text || "";
@@ -320,10 +362,8 @@ app.post("/stitch", async (req, res) => {
       return res.status(400).json({ error: "Provide clips: [url1,url2,url3]" });
     }
 
-    // Font selection based on shop_kategorie
     const fontInfo = getFontForKategorie(shop_kategorie);
 
-    // 1-3) Alle Assets parallel downloaden (clips + audio + bgm)
     const clipCount_dl = Math.min(3, clips.length);
     const clipPaths = Array.from({ length: clipCount_dl }, (_, i) => path.join(TMP, `clip_${i}.mp4`));
     const audioCand = audioUrl
@@ -348,7 +388,6 @@ app.post("/stitch", async (req, res) => {
 
     console.log(`[download] all assets ready in ${((Date.now() - dlStart) / 1000).toFixed(1)}s`);
 
-    // 4) Input-Index-Tracking (clips → voiceover → bgm)
     let voIdx = -1, bgmIdx = -1;
     const ffInputArgs = [...local.flatMap((p) => ["-i", p])];
     if (audioPath) {
@@ -360,7 +399,6 @@ app.post("/stitch", async (req, res) => {
       ffInputArgs.push("-i", bgmPath);
     }
 
-    // 5) Clip-Längen bestimmen (parallel)
     const durations = await Promise.all(local.map(probeDurationSeconds));
 
     const d0 = durations[0] ?? 10.0;
@@ -371,7 +409,6 @@ app.post("/stitch", async (req, res) => {
     const padNeeded = Math.max(0, Number(targetDuration) - estTotal);
     const fadeStart = Math.max(0, Number(targetDuration) - Number(fadeOut));
 
-    // 6) Video xfade-Kette → [vout]
     const videoFilter =
       `[0:v]setpts=PTS-STARTPTS[v0];` +
       `[1:v]setpts=PTS-STARTPTS[v1];` +
@@ -383,7 +420,6 @@ app.post("/stitch", async (req, res) => {
 
     const out = path.join(TMP, "stitched.mp4");
 
-    // 7) Untertitel generieren (ASS-Format, Wort-für-Wort via Whisper)
     const SUBDIR = "/tmp/subs";
     if (!fs.existsSync(SUBDIR)) fs.mkdirSync(SUBDIR, { recursive: true });
     const subtitleFile = path.join(SUBDIR, "subtitles.ass");
@@ -420,19 +456,16 @@ app.post("/stitch", async (req, res) => {
       }
     }
 
-    // 8) Subtitle filter (ASS — styles embedded, fontsdir points to downloaded fonts)
     const subFilter = haveSubtitleFile
       ? `,subtitles=${escPathForFilter(subtitleFile)}:fontsdir=${escPathForFilter(FONTS_DIR)}`
       : "";
     const colorGrade = getColorGradeFilter(shop_kategorie);
 
-    // 9) Video-Post-Process: scale to 720p → colorgrade → subs → tpad → fade → [vpre]
     const videoPostProcess =
       `[vout]scale=-2:720${colorGrade}${subFilter}` +
       (padNeeded > 0 ? `,tpad=stop_mode=clone:stop_duration=${padNeeded.toFixed(3)}` : "") +
       `,fade=t=out:st=${fadeStart.toFixed(3)}:d=${Number(fadeOut).toFixed(3)}[vpre]`;
 
-    // 10) Audio-Filter — Sidechain Compress wenn VO + BGM
     let audioFilterStr = "";
     let audioMapTarget = "";
 
@@ -452,7 +485,6 @@ app.post("/stitch", async (req, res) => {
       audioMapTarget = "[aout]";
     }
 
-    // 11) Kompletter filter_complex — [vpre]format=yuv420p[v] als letzter Schritt
     const fullFilter =
       `${videoFilter};${videoPostProcess}` +
       `;[vpre]format=yuv420p[v]` +
@@ -519,5 +551,4 @@ server.requestTimeout = 600000;
 server.headersTimeout = 610000;
 if (typeof server.setTimeout === "function") server.setTimeout(600000);
 
-// Download fonts in background — non-blocking, server starts immediately
 ensureFonts().catch((e) => console.error("[fonts] startup download error:", e.message));
