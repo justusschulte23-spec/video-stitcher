@@ -8,9 +8,9 @@ RUN npm install
 # FFmpeg + Python3 + wget
 RUN apt-get update && apt-get install -y ffmpeg wget python3 python3-pip && rm -rf /var/lib/apt/lists/*
 
-# Python deps for /composite endpoint
+# Python deps for /composite endpoint (Pillow only — rembg not needed here)
 COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY . .
 
